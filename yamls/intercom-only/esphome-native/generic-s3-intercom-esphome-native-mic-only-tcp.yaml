@@ -37,7 +37,7 @@ substitutions:
   name: generic-native-int-mic-tcp
   friendly_name: Generic S3 Native Intercom Mic Only TCP
 
-  ext_components_source: "github://n-IA-hane/esphome-intercom@main"
+  ext_components_source: "github://n-IA-hane/esphome-intercom@dev"
   intercom_tcp_port: "6054"
 
   status_led_pin: GPIO48
@@ -45,13 +45,13 @@ substitutions:
   status_led_rgb_order: GRB
 
 packages:
-  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@main
-  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@main
-  ha_api: github://n-IA-hane/esphome-intercom/packages/intercom/ha_api.yaml@main
-  intercom_auto_entities: github://n-IA-hane/esphome-intercom/packages/intercom/auto_entities.yaml@main
-  intercom_buttons: github://n-IA-hane/esphome-intercom/packages/intercom/buttons_base.yaml@main
-  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@main
-  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@main
+  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@dev
+  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@dev
+  ha_api: github://n-IA-hane/esphome-intercom/packages/intercom/ha_api.yaml@dev
+  intercom_auto_entities: github://n-IA-hane/esphome-intercom/packages/intercom/auto_entities.yaml@dev
+  intercom_buttons: github://n-IA-hane/esphome-intercom/packages/intercom/buttons_base.yaml@dev
+  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@dev
+  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@dev
 
 esphome:
   name: ${name}
