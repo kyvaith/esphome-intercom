@@ -499,11 +499,11 @@ std::string IntercomApi::build_endpoint_string_() const {
 
   char buf[192];
   if (this->protocol_ == TransportType::UDP) {
-    snprintf(buf, sizeof(buf), "%s|udp|%s|%u|%u|%s", name.c_str(), ip.c_str(),
+    snprintf(buf, sizeof(buf), "%s | udp | %s | %u | %u | %s", name.c_str(), ip.c_str(),
              (unsigned) this->listen_port_, (unsigned) this->control_port_,
              this->audio_capability_());
   } else {
-    snprintf(buf, sizeof(buf), "%s|tcp|%s|%u|%s", name.c_str(), ip.c_str(),
+    snprintf(buf, sizeof(buf), "%s | tcp | %s | %u | %s", name.c_str(), ip.c_str(),
              (unsigned) this->tcp_port_, this->audio_capability_());
   }
   return buf;
