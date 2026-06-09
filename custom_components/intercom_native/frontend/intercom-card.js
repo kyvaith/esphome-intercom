@@ -61,6 +61,7 @@ class IntercomCard extends HTMLElement {
     this._unsubscribeAudio = null;
     this._chunksSent = 0;
     this._chunksReceived = 0;
+    this._cleanupTask = null;
 
     // Device info
     this._activeDeviceInfo = null;
@@ -244,6 +245,7 @@ class IntercomCard extends HTMLElement {
     const data = event?.data;
     if (!this._eventConcernsThisCard(data)) return;
     const st = (data.state || "").toLowerCase();
+    const terminalState = this._isTerminalSessionState(st);
     const reason = data.reason || "";
     const origin = (data.origin || "").toLowerCase() || null;
     const peer = data.peer_name || "";
@@ -263,7 +265,7 @@ class IntercomCard extends HTMLElement {
       if (outgoingRinging) this._destRinging = true;
       if (Object.prototype.hasOwnProperty.call(data, "dnd")) this._softphoneDnd = !!data.dnd;
       if (data.caller || data.peer_name) this._sessionCaller = data.caller || data.peer_name;
-      if (st === "idle" || st === "disconnected" || st === "declined" || st === "error") {
+      if (terminalState) {
         this._sessionCaller = "";
         this._activeSessionDeviceId = null;
       }
@@ -281,7 +283,7 @@ class IntercomCard extends HTMLElement {
     if (st === "streaming" || st === "ringing") {
       this._clearEndReason(false);
       if (st === "streaming") this._destRinging = false;
-    } else if (mirrorEspReason && (st === "idle" || st === "disconnected" || st === "declined" || st === "error")) {
+    } else if (mirrorEspReason && terminalState) {
       // ESP-to-ESP card mode mirrors the ESP text sensors. Bridge/session
       // events are useful for HA softphone state, but the terminal reason
       // shown here must come from the ESP's own last_reason sensor.
@@ -305,7 +307,42 @@ class IntercomCard extends HTMLElement {
     } else if (st === "error") {
       this._captureEndReason("error", String(data.code ?? ""), origin || "remote", peer);
     }
+    if (terminalState && this._isSoftphoneContext()) {
+      this._cleanupAfterTerminalSession();
+    }
     this._render();
+  }
+
+  _isTerminalSessionState(state) {
+    return state === "idle" ||
+           state === "disconnected" ||
+           state === "declined" ||
+           state === "error";
+  }
+
+  _hasBrowserAudioPath() {
+    return !!(
+      this._audioStreaming ||
+      this._mediaStream ||
+      this._workletNode ||
+      this._source ||
+      this._audioContext ||
+      this._playbackContext ||
+      this._unsubscribeAudio
+    );
+  }
+
+  _cleanupAfterTerminalSession() {
+    this._autoAnswering = false;
+    this._starting = false;
+    this._stopping = false;
+    if (!this._hasBrowserAudioPath() || this._cleanupTask) return;
+    this._cleanupTask = this._cleanup()
+      .catch((err) => console.warn("intercom-card: softphone cleanup failed", err))
+      .finally(() => {
+        this._cleanupTask = null;
+        this._render();
+      });
   }
 
   _captureEndReason(kind, reason, origin, peerOverride = "") {
@@ -1790,7 +1827,7 @@ class IntercomCard extends HTMLElement {
   }
 
   async _cleanup() {
-    const wasSoftphone = this._isConfiguredSoftphone();
+    const wasSoftphone = this._isSoftphoneContext();
     if (this._unsubscribeAudio) { this._unsubscribeAudio(); this._unsubscribeAudio = null; }
     if (this._mediaStream) { this._mediaStream.getTracks().forEach(t => t.stop()); this._mediaStream = null; }
     if (this._workletNode) { this._workletNode.disconnect(); this._workletNode = null; }
