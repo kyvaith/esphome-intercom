@@ -10,8 +10,13 @@ const TARGET_SAMPLE_RATE = 16000;
 class RecorderProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this._buffer = [];
     this._targetSamples = 512; // 32ms chunks @ 16kHz, matches ESP AUDIO_CHUNK_SIZE
+    this._buffers = [
+      new Int16Array(this._targetSamples),
+      new Int16Array(this._targetSamples)
+    ];
+    this._activeBuffer = 0;
+    this._writeIndex = 0;
     this._frameCount = 0;
     this._chunksSent = 0;
     this._totalSamplesProcessed = 0;
@@ -49,36 +54,32 @@ class RecorderProcessor extends AudioWorkletProcessor {
     for (let i = 0; i < float32Data.length; i++) {
       this._resampleAccum += 1;
       if (this._resampleAccum >= this._resampleRatio) {
-        this._buffer.push(float32Data[i]);
+        const s = Math.max(-1, Math.min(1, float32Data[i]));
+        this._buffers[this._activeBuffer][this._writeIndex++] =
+          s < 0 ? s * 0x8000 : s * 0x7fff;
         this._resampleAccum -= this._resampleRatio;
+
+        if (this._writeIndex === this._targetSamples) {
+          const frame = this._buffers[this._activeBuffer];
+          this._chunksSent++;
+
+          // Transfer the completed frame; transferred buffers are detached, so
+          // replace the slot before it can be reused by the audio callback.
+          try {
+            this.port.postMessage({
+              type: "audio",
+              buffer: frame.buffer
+            }, [frame.buffer]);
+          } catch (err) {
+            console.error("[IntercomProcessor] postMessage error:", err);
+          }
+          this._buffers[this._activeBuffer] = new Int16Array(this._targetSamples);
+          this._activeBuffer ^= 1;
+          this._writeIndex = 0;
+        }
       }
     }
     this._totalSamplesProcessed += float32Data.length;
-
-    // When we have enough samples, convert and send
-    while (this._buffer.length >= this._targetSamples) {
-      const chunk = this._buffer.splice(0, this._targetSamples);
-
-      // Convert Float32 (-1.0 to 1.0) to Int16 (-32768 to 32767)
-      // Following HA's exact pattern from recorder-worklet.js
-      const int16Data = new Int16Array(chunk.length);
-      for (let i = 0; i < chunk.length; i++) {
-        const s = Math.max(-1, Math.min(1, chunk[i]));
-        int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-      }
-
-      this._chunksSent++;
-
-      // Send to main thread (transferable for performance)
-      try {
-        this.port.postMessage({
-          type: "audio",
-          buffer: int16Data.buffer
-        }, [int16Data.buffer]);
-      } catch (err) {
-        console.error("[IntercomProcessor] postMessage error:", err);
-      }
-    }
 
     return true; // Keep processor alive
   }

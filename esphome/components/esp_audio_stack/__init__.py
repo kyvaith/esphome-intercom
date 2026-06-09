@@ -118,6 +118,12 @@ CODEC_KIND = {
 }
 RATE_CVT_PERF_TYPES = ("speed", "memory")
 
+# Keep realtime audio builds reproducible. These are the component-manager
+# versions resolved by the maintained Waveshare S3 AFE build on ESP-IDF 5.5.4.
+ESP_AUDIO_EFFECTS_REF = "1.3.0~1"
+ESP_CODEC_DEV_REF = "1.5.10"
+GMF_IO_REF = "0.8.1"
+
 I2S_OPTIONAL_MCLK = cv.Any(
     cv.int_range(min=-1, max=-1),
     pins.internal_gpio_output_pin_number,
@@ -626,15 +632,12 @@ async def to_code(config):
     use_ring_ref = use_mono_ref and config[CONF_AEC_REFERENCE_MODE] == "ring_buffer"
     use_previous_frame_ref = use_mono_ref and config[CONF_AEC_REFERENCE_MODE] == "previous_frame"
 
-    # esp_audio_stack refactor policy: track Espressif registry latest by default.
-    # ESPHome requires `ref`; "*" maps to an unpinned/latest registry version.
-    # Replace it only when a concrete upstream regression is documented.
     has_hardware_codec = CONF_CODEC in config
     has_output_codec = has_hardware_codec and CONF_OUTPUT in config[CONF_CODEC]
-    add_idf_component(name="espressif/esp_audio_effects", ref="*")
+    add_idf_component(name="espressif/esp_audio_effects", ref=ESP_AUDIO_EFFECTS_REF)
     if has_hardware_codec:
-        add_idf_component(name="espressif/esp_codec_dev", ref="*")
-        add_idf_component(name="espressif/gmf_io", ref="*")
+        add_idf_component(name="espressif/esp_codec_dev", ref=ESP_CODEC_DEV_REF)
+        add_idf_component(name="espressif/gmf_io", ref=GMF_IO_REF)
     await cg.register_component(var, config)
 
     # Define USE_ESP_AUDIO_STACK so other components know it's available

@@ -86,9 +86,10 @@ class TcpTransport : public IntercomTransport {
   SemaphoreHandle_t send_mutex_{nullptr};
   uint8_t *rx_buffer_{nullptr};  // server_task_ only
 
-  TaskHandle_t server_task_handle_{nullptr};
+	  TaskHandle_t server_task_handle_{nullptr};
   StaticTask_t server_task_tcb_{};
   StackType_t *server_task_stack_{nullptr};
+  std::atomic<TaskHandle_t> server_stop_waiter_{nullptr};
 
   // server_task_ exits cleanly when this clears.
   std::atomic<bool> running_{false};

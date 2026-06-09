@@ -1847,7 +1847,12 @@ void EspAfe::handle_manager_result_(afe_fetch_result_t *result) {
 
 #ifdef USE_ESP_AFE_DIRECT_PATH
 void EspAfe::direct_fetch_task_trampoline_(void *arg) {
-  static_cast<EspAfe *>(arg)->direct_fetch_task_loop_();
+  auto *self = static_cast<EspAfe *>(arg);
+  self->direct_fetch_task_loop_();
+  TaskHandle_t waiter = self->direct_fetch_stop_waiter_.load(std::memory_order_acquire);
+  if (waiter != nullptr) {
+    xTaskNotifyGive(waiter);
+  }
   vTaskDelete(nullptr);
 }
 
@@ -1878,6 +1883,7 @@ bool EspAfe::start_direct_fetch_task_() {
   if (this->direct_fetch_task_handle_ != nullptr) {
     return true;
   }
+  this->direct_fetch_stop_waiter_.store(nullptr, std::memory_order_release);
   if (this->direct_fetch_task_stack_ == nullptr) {
     this->direct_fetch_task_stack_ = static_cast<StackType_t *>(
         heap_caps_malloc(kDirectFetchTaskStackWords * sizeof(StackType_t),
@@ -1908,16 +1914,17 @@ void EspAfe::stop_direct_fetch_task_() {
     this->direct_fetch_running_ = false;
     return;
   }
+  TaskHandle_t waiter = xTaskGetCurrentTaskHandle();
+  ulTaskNotifyTake(pdTRUE, 0);
+  this->direct_fetch_stop_waiter_.store(waiter, std::memory_order_release);
   this->direct_fetch_running_ = false;
   if (this->direct_feed_signal_ != nullptr) {
     xSemaphoreGive(this->direct_feed_signal_);
   }
-  for (int i = 0; i < 25; i++) {
-    if (eTaskGetState(this->direct_fetch_task_handle_) == eDeleted) {
-      break;
-    }
-    vTaskDelay(pdMS_TO_TICKS(10));
+  if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250)) == 0) {
+    ESP_LOGW(TAG, "Timed out waiting for single-mic AFE fetch task to exit");
   }
+  this->direct_fetch_stop_waiter_.store(nullptr, std::memory_order_release);
   this->direct_fetch_task_handle_ = nullptr;
 }
 #endif

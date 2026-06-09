@@ -42,6 +42,8 @@ class ESPAudioStackSpeaker : public speaker::Speaker,
   void set_timeout(uint32_t timeout) { this->timeout_ = timeout; }
 
  protected:
+  static void speaker_output_callback_(void *ctx, uint32_t frames, int64_t timestamp);
+
   bool pause_state_{false};
   bool finishing_{false};  // Non-blocking drain: finish() sets flag, loop() handles drain+stop
   optional<uint32_t> timeout_;

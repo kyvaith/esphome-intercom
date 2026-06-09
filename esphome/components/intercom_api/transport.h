@@ -4,13 +4,17 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <string>
 
 #include "intercom_protocol.h"
 
 namespace esphome {
 namespace intercom_api {
+
+using TransportAudioCallback = void (*)(void *ctx, const uint8_t *pcm, size_t bytes);
+using TransportControlCallback = void (*)(void *ctx, MessageType type, const uint8_t *payload, size_t len);
+using TransportConnectionCallback = void (*)(void *ctx, bool connected);
+using TransportAcceptCallback = bool (*)(void *ctx);
 
 /// Abstract transport for audio + control. IntercomApi composes one and
 /// never touches sockets directly.
@@ -66,18 +70,59 @@ class IntercomTransport {
 
   // === Callbacks (set by IntercomApi before start()) ===
 
+  void set_audio_callback(TransportAudioCallback cb, void *ctx) {
+    this->on_audio_frame_ = cb;
+    this->on_audio_frame_ctx_ = ctx;
+  }
+
+  void set_control_callback(TransportControlCallback cb, void *ctx) {
+    this->on_control_ = cb;
+    this->on_control_ctx_ = ctx;
+  }
+
+  void set_connection_callback(TransportConnectionCallback cb, void *ctx) {
+    this->on_connection_change_ = cb;
+    this->on_connection_change_ctx_ = ctx;
+  }
+
+  void set_accept_callback(TransportAcceptCallback cb, void *ctx) {
+    this->should_accept_session_cb_ = cb;
+    this->should_accept_session_ctx_ = ctx;
+  }
+
+ protected:
   /// Buffer lifetime = callback duration only.
-  std::function<void(const uint8_t *pcm, size_t bytes)> on_audio_frame;
+  void emit_audio_frame_(const uint8_t *pcm, size_t bytes) {
+    if (this->on_audio_frame_ != nullptr) this->on_audio_frame_(this->on_audio_frame_ctx_, pcm, bytes);
+  }
 
   /// Protocol messages only; PING/PONG never cross.
-  std::function<void(MessageType type, const uint8_t *payload, size_t len)>
-      on_control;
+  void emit_control_(MessageType type, const uint8_t *payload, size_t len) {
+    if (this->on_control_ != nullptr) this->on_control_(this->on_control_ctx_, type, payload, len);
+  }
 
   /// TCP: per accept/disconnect. UDP: once per start/stop.
-  std::function<void(bool connected)> on_connection_change;
+  void emit_connection_change_(bool connected) {
+    if (this->on_connection_change_ != nullptr) {
+      this->on_connection_change_(this->on_connection_change_ctx_, connected);
+    }
+  }
 
   /// TCP gate before accept. UDP ignores (no per-session concept).
-  std::function<bool()> should_accept_session;
+  bool should_accept_session_() const {
+    return this->should_accept_session_cb_ == nullptr ||
+           this->should_accept_session_cb_(this->should_accept_session_ctx_);
+  }
+
+ private:
+  TransportAudioCallback on_audio_frame_{nullptr};
+  void *on_audio_frame_ctx_{nullptr};
+  TransportControlCallback on_control_{nullptr};
+  void *on_control_ctx_{nullptr};
+  TransportConnectionCallback on_connection_change_{nullptr};
+  void *on_connection_change_ctx_{nullptr};
+  TransportAcceptCallback should_accept_session_cb_{nullptr};
+  void *should_accept_session_ctx_{nullptr};
 };
 
 }  // namespace intercom_api

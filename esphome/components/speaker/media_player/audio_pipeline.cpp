@@ -45,6 +45,8 @@ enum EventGroupBits : uint32_t {
   DECODER_MESSAGE_FINISHED = (1 << 12),
   // Error decoding the file; cleared by process_state() by decoder task
   DECODER_MESSAGE_ERROR = (1 << 13),
+  // Decoder has attached to raw_file_ring_buffer_; cleared by reader task
+  DECODER_MESSAGE_ACCEPTED_SOURCE = (1 << 14),
 };
 
 AudioPipeline::AudioPipeline(speaker::Speaker *speaker, size_t buffer_size, bool task_stack_in_psram,
@@ -298,7 +300,8 @@ void AudioPipeline::read_task(void *params) {
     if (!(event_bits & EventGroupBits::PIPELINE_COMMAND_STOP)) {
       xEventGroupClearBits(this_pipeline->event_group_, EventGroupBits::READER_MESSAGE_FINISHED |
                                                             EventGroupBits::READER_COMMAND_INIT_FILE |
-                                                            EventGroupBits::READER_COMMAND_INIT_HTTP);
+                                                            EventGroupBits::READER_COMMAND_INIT_HTTP |
+                                                            EventGroupBits::DECODER_MESSAGE_ACCEPTED_SOURCE);
       InfoErrorEvent event;
       event.source = InfoErrorSource::READER;
       esp_err_t err = ESP_OK;
@@ -364,8 +367,11 @@ void AudioPipeline::read_task(void *params) {
       event_bits = xEventGroupGetBits(this_pipeline->event_group_);
       if ((event_bits & EventGroupBits::READER_MESSAGE_LOADED_MEDIA_TYPE) ||
           (this_pipeline->raw_file_ring_buffer_.use_count() == 1)) {
-        // Decoder task hasn't started yet, so delay a bit before releasing ownership of the ring buffer
-        delay(10);
+        // Keep the reader's shared_ptr alive until the decoder has attached to
+        // the ring buffer. The timeout preserves the previous fail-soft
+        // behavior if playback is stopped before the decoder starts.
+        xEventGroupWaitBits(this_pipeline->event_group_, EventGroupBits::DECODER_MESSAGE_ACCEPTED_SOURCE,
+                            pdTRUE, pdFALSE, pdMS_TO_TICKS(100));
       }
     }
   }
@@ -397,6 +403,7 @@ void AudioPipeline::decode_task(void *params) {
 
       esp_err_t err = decoder->start(this_pipeline->current_audio_file_type_);
       decoder->add_source(this_pipeline->raw_file_ring_buffer_);
+      xEventGroupSetBits(this_pipeline->event_group_, EventGroupBits::DECODER_MESSAGE_ACCEPTED_SOURCE);
 
       if (err != ESP_OK) {
         // Send specific error message

@@ -86,12 +86,14 @@ class UdpTransport : public IntercomTransport {
 
   int audio_socket_{-1};
   int control_socket_{-1};
-  TaskHandle_t recv_task_handle_{nullptr};
+	  TaskHandle_t recv_task_handle_{nullptr};
   StaticTask_t recv_task_tcb_{};
   StackType_t *recv_task_stack_{nullptr};
+  std::atomic<TaskHandle_t> recv_stop_waiter_{nullptr};
   TaskHandle_t ctrl_task_handle_{nullptr};
   StaticTask_t ctrl_task_tcb_{};
   StackType_t *ctrl_task_stack_{nullptr};
+  std::atomic<TaskHandle_t> ctrl_stop_waiter_{nullptr};
 
   std::atomic<bool> running_{false};
   std::atomic<bool> active_{false};        // mirrors start/stop

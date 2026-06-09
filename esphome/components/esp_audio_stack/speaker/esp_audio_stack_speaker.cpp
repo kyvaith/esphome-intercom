@@ -27,9 +27,10 @@ void ESPAudioStackSpeaker::setup() {
 
   // Forward frame-played notifications from I2S audio task to mixer callbacks.
   // Without this, mixer source speakers can't track pending_playback_frames.
-  this->parent_->add_speaker_output_callback([this](uint32_t frames, int64_t timestamp) {
-    this->audio_output_callback_.call(frames, timestamp);
-  });
+  if (!this->parent_->add_speaker_output_callback(ESPAudioStackSpeaker::speaker_output_callback_, this)) {
+    ESP_LOGE(TAG, "Failed to register parent speaker callback");
+    this->mark_failed();
+  }
 }
 
 void ESPAudioStackSpeaker::dump_config() {
@@ -92,6 +93,10 @@ void ESPAudioStackSpeaker::finish() {
   }
   this->finishing_ = true;
   this->enable_loop_soon_any_context();
+}
+
+void ESPAudioStackSpeaker::speaker_output_callback_(void *ctx, uint32_t frames, int64_t timestamp) {
+  static_cast<ESPAudioStackSpeaker *>(ctx)->audio_output_callback_.call(frames, timestamp);
 }
 
 size_t ESPAudioStackSpeaker::play(const uint8_t *data, size_t length) {

@@ -1935,7 +1935,11 @@ class IntercomCard extends HTMLElement {
 
   _sendAudio(int16Array) {
     if (!this._audioStreaming || !this._activeDeviceInfo) return;
-    const bytes = new Uint8Array(int16Array.buffer);
+    const bytes = new Uint8Array(
+      int16Array.buffer,
+      int16Array.byteOffset,
+      int16Array.byteLength
+    );
     let binary = "";
     for (let i = 0; i < bytes.length; i += 0x8000) {
       binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 0x8000, bytes.length)));

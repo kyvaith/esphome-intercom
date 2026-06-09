@@ -146,25 +146,33 @@ bool IntercomApi::setup_transport_() {
   }
 
   // Wire callbacks before start() so the transport task never fires into null.
-  this->transport_->on_audio_frame = [this](const uint8_t *pcm, size_t bytes) {
-    this->on_audio_received_(pcm, bytes);
-  };
-  this->transport_->on_control = [this](MessageType type,
-                                        const uint8_t *payload, size_t len) {
-    this->on_control_received_(type, payload, len);
-  };
-  this->transport_->on_connection_change = [this](bool connected) {
-    this->on_connection_change_(connected);
-  };
-  this->transport_->should_accept_session = [this]() -> bool {
-    return this->can_accept_session_();
-  };
+  this->transport_->set_audio_callback(IntercomApi::transport_audio_callback_, this);
+  this->transport_->set_control_callback(IntercomApi::transport_control_callback_, this);
+  this->transport_->set_connection_callback(IntercomApi::transport_connection_callback_, this);
+  this->transport_->set_accept_callback(IntercomApi::transport_accept_callback_, this);
 
   if (!this->transport_->start()) {
     ESP_LOGE(TAG, "Transport failed to start");
     return false;
   }
   return true;
+}
+
+void IntercomApi::transport_audio_callback_(void *ctx, const uint8_t *pcm, size_t bytes) {
+  static_cast<IntercomApi *>(ctx)->on_audio_received_(pcm, bytes);
+}
+
+void IntercomApi::transport_control_callback_(void *ctx, MessageType type,
+                                              const uint8_t *payload, size_t len) {
+  static_cast<IntercomApi *>(ctx)->on_control_received_(type, payload, len);
+}
+
+void IntercomApi::transport_connection_callback_(void *ctx, bool connected) {
+  static_cast<IntercomApi *>(ctx)->on_connection_change_(connected);
+}
+
+bool IntercomApi::transport_accept_callback_(void *ctx) {
+  return static_cast<IntercomApi *>(ctx)->can_accept_session_();
 }
 
 bool IntercomApi::start_runtime_tasks_() {

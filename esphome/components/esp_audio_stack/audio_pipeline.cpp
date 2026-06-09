@@ -93,6 +93,7 @@ void ESPAudioStack::release_audio_buffers_() {
   free_i16_buffer(&this->prealloc_spk_ref_buffer_, &this->prealloc_spk_ref_buffer_bytes_);
   free_i16_buffer(&this->prealloc_tx_ref_mono_buffer_, &this->prealloc_tx_ref_mono_buffer_bytes_);
   free_i16_buffer(&this->prealloc_aec_output_, &this->prealloc_aec_output_bytes_);
+  free_i16_buffer(&this->prealloc_tx_clock_buffer_, &this->prealloc_tx_clock_buffer_bytes_);
   if (this->mic_alc_handle_ != nullptr) {
     esp_ae_alc_close(static_cast<esp_ae_alc_handle_t>(this->mic_alc_handle_));
     this->mic_alc_handle_ = nullptr;
@@ -168,6 +169,9 @@ bool ESPAudioStack::allocate_audio_buffers_(AudioTaskCtx &ctx) {
   tx_interleave_bytes =
       (!ctx.use_tdm_bus && ctx.num_ch > 1 && ctx.speaker_channels == 1) ? ctx.bus_frame_size * ctx.num_ch * sizeof(int16_t) : 0;
 #endif
+  const size_t tx_clock_bytes = ctx.use_tdm_bus
+      ? tdm_tx_bytes
+      : ctx.bus_frame_size * ctx.num_ch * ctx.i2s_bps;
   size_t tx_32_bytes = 0;
 #ifdef USE_ESP_AUDIO_STACK_32BIT
   tx_32_bytes = ctx.i2s_bps == 4
@@ -258,6 +262,8 @@ bool ESPAudioStack::allocate_audio_buffers_(AudioTaskCtx &ctx) {
             (this->prealloc_tx_interleave_buffer_ != nullptr &&
              this->prealloc_tx_interleave_buffer_bytes_ >= tx_interleave_bytes))
 #endif
+        && (this->prealloc_tx_clock_buffer_ != nullptr &&
+            this->prealloc_tx_clock_buffer_bytes_ >= tx_clock_bytes)
 #ifdef USE_ESP_AUDIO_STACK_32BIT
         && (tx_32_bytes == 0 ||
             (this->prealloc_tx_32_buffer_ != nullptr &&
@@ -303,6 +309,9 @@ bool ESPAudioStack::allocate_audio_buffers_(AudioTaskCtx &ctx) {
                      tdm_tx_bytes, buf_caps, false);
     alloc_i16_buffer(&this->prealloc_tx_silence_buffer_, &this->prealloc_tx_silence_buffer_bytes_,
                      tx_silence_bytes, buf_caps, true);
+    if (this->prealloc_tx_silence_buffer_ != nullptr) {
+      memset(this->prealloc_tx_silence_buffer_, 0, tx_silence_bytes);
+    }
   }
 #endif
 
@@ -318,6 +327,12 @@ bool ESPAudioStack::allocate_audio_buffers_(AudioTaskCtx &ctx) {
                      tx_interleave_bytes, buf_caps, true);
   }
 #endif
+
+  alloc_i16_buffer(&this->prealloc_tx_clock_buffer_, &this->prealloc_tx_clock_buffer_bytes_,
+                   tx_clock_bytes, buf_caps, false);
+  if (this->prealloc_tx_clock_buffer_ != nullptr) {
+    memset(this->prealloc_tx_clock_buffer_, 0, tx_clock_bytes);
+  }
 
 #ifdef USE_ESP_AUDIO_STACK_32BIT
   if (tx_32_bytes > 0) {
@@ -473,6 +488,10 @@ void ESPAudioStack::audio_task_() {
   // to park/wake the inner session loop.
   while (true) {
     this->audio_task_idle_.store(true, std::memory_order_relaxed);
+    TaskHandle_t waiter = this->audio_idle_waiter_.load(std::memory_order_acquire);
+    if (waiter != nullptr) {
+      xTaskNotifyGive(waiter);
+    }
     if (this->prealloc_requested_.exchange(false, std::memory_order_acq_rel)) {
       this->preallocate_audio_buffers_from_task_();
     }
@@ -567,6 +586,17 @@ bool ESPAudioStack::prepare_audio_context_(AudioTaskCtx &ctx, bool require_proce
   }
   ctx.mic_separate = (ctx.ratio > 1) || ctx.use_stereo_aec_ref ||
                      ctx.rx_slot_mode_stereo || ctx.use_tdm_bus || (ctx.i2s_bps == 4);
+  if (ctx.use_tdm_bus) {
+    ctx.rx_path_kind = RxPathKind::TDM;
+  } else if (ctx.use_stereo_aec_ref) {
+    ctx.rx_path_kind = RxPathKind::STEREO_REF;
+  } else if (ctx.rx_slot_mode_stereo) {
+    ctx.rx_path_kind = RxPathKind::STEREO_SLOT;
+  } else if (ctx.ratio > 1 || ctx.i2s_bps == 4) {
+    ctx.rx_path_kind = RxPathKind::MONO_EFFECTS;
+  } else {
+    ctx.rx_path_kind = RxPathKind::PASSTHROUGH;
+  }
   return true;
 }
 
@@ -672,6 +702,7 @@ void ESPAudioStack::audio_session_() {
   ctx.tx_32_buffer = this->prealloc_tx_32_buffer_;
 #endif
   ctx.aec_output = this->prealloc_aec_output_;
+  ctx.tx_clock_buffer = this->prealloc_tx_clock_buffer_;
 #ifdef USE_ESP_AUDIO_STACK_TDM_BUS
   if (ctx.use_tdm_bus) {
     ctx.tdm_tx_frame_bytes = ctx.bus_frame_size * ctx.tdm_total_slots * ctx.i2s_bps;
@@ -709,8 +740,13 @@ void ESPAudioStack::audio_session_() {
     ctx.speaker_running = this->speaker_running_.load(std::memory_order_relaxed);
     ctx.speaker_paused = this->speaker_paused_.load(std::memory_order_relaxed);
     ctx.mic_running = this->has_mic_consumers_.load(std::memory_order_relaxed);
+    this->update_runtime_audio_flags_(ctx);
 
-    this->process_rx_path_(ctx);
+    if (ctx.need_rx_processing) {
+      this->process_rx_path_(ctx);
+    } else if (ctx.need_rx_drain) {
+      this->drain_rx_minimal_(ctx);
+    }
 
     ctx.processor_enabled = this->processor_enabled_.load(std::memory_order_relaxed);
 #ifdef USE_AUDIO_PROCESSOR
@@ -719,8 +755,14 @@ void ESPAudioStack::audio_session_() {
 #endif
     ctx.now_ms = millis();
 
-    this->process_aec_and_callbacks_(ctx);
-    this->process_tx_path_(ctx);
+    if (ctx.need_rx_processing) {
+      this->process_aec_and_callbacks_(ctx);
+    }
+    if (ctx.clock_only_tx) {
+      this->process_tx_clock_only_(ctx);
+    } else if (ctx.need_tx_audio) {
+      this->process_tx_path_(ctx);
+    }
 
 #ifdef USE_AUDIO_PROCESSOR
     // Frame_spec change, for example an AFE mode or graph rebuild: exit this session
@@ -803,14 +845,14 @@ void ESPAudioStack::audio_session_() {
     }
 #endif
 
-    // delay(1) (vTaskDelay) yields to lower-priority tasks too, so IDLE
+    // vTaskDelay(1) yields to lower-priority tasks too, so IDLE
     // gets to run and feed the task watchdog. taskYIELD() only cedes to
     // same- or higher-priority tasks; with this audio loop pinned at
     // prio 19 above lwIP=18, IDLE0 would never run on Core 0 and TWDT
     // would trip. The blocking GMF codec IO read above usually parks the
     // task long enough for IDLE to run, but the fast path (return with
     // data immediately available) needs an explicit cooperative point.
-    delay(1);
+    vTaskDelay(1);
   }
 
 cleanup:
@@ -821,18 +863,30 @@ cleanup:
   ESP_LOGD(TAG, "Audio session ended");
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-// RX PATH: I2S read -> deinterleave/rate-convert -> mic_buffer + spk_ref_buffer
-// ════════════════════════════════════════════════════════════════════════════
-void ESPAudioStack::process_rx_path_(AudioTaskCtx &ctx) {
-  if (!this->rx_handle_)
-    return;
+void ESPAudioStack::update_runtime_audio_flags_(AudioTaskCtx &ctx) {
+  ctx.any_tdm_slot_level_sensor_enabled =
+      this->any_tdm_slot_level_sensor_enabled_.load(std::memory_order_relaxed);
+  ctx.need_rx_processing = this->rx_handle_ != nullptr &&
+                           (ctx.mic_running || ctx.any_tdm_slot_level_sensor_enabled);
+  // If RX is enabled but nobody needs the decoded mic surface, still drain the
+  // driver/codec queue so DMA does not build backpressure while speaker-only
+  // playback is active.
+  ctx.need_rx_drain = this->rx_handle_ != nullptr && !ctx.need_rx_processing;
+  ctx.need_tx_audio = this->tx_handle_ != nullptr && ctx.speaker_running && !ctx.speaker_paused;
+  // ESP-IDF full-duplex shares clock signals; keep TX moving whenever the
+  // stack owns TX, even if the frame is just silence for RX clocking.
+  ctx.need_tx_clock = this->tx_handle_ != nullptr;
+  ctx.clock_only_tx = ctx.need_tx_clock && !ctx.need_tx_audio;
+}
 
-  auto conversion_fail = [this](const char *stage) {
-    ESP_LOGE(TAG, "%s failed; stopping audio session", stage);
-    this->has_i2s_error_.store(true, std::memory_order_relaxed);
-    this->audio_stack_running_.store(false, std::memory_order_relaxed);
-  };
+void ESPAudioStack::drain_rx_minimal_(AudioTaskCtx &ctx) {
+  if (!this->read_rx_frame_(ctx, "drain"))
+    return;
+}
+
+bool ESPAudioStack::read_rx_frame_(AudioTaskCtx &ctx, const char *label) {
+  if (!this->rx_handle_ || ctx.rx_buffer == nullptr)
+    return false;
 
 #ifdef USE_ESP_AUDIO_STACK_HARDWARE_CODEC
   const bool read_ok = this->codec_backend_.read(ctx.rx_buffer, ctx.rx_frame_bytes);
@@ -845,161 +899,203 @@ void ESPAudioStack::process_rx_path_(AudioTaskCtx &ctx) {
   const bool io_closed = read_err == ESP_ERR_INVALID_STATE;
 #endif
   if (!read_ok && io_closed) {
-    // Brief INVALID_STATE around stop() teardown is expected (channel
-    // disabled mid-flight). Escalate only if audio_stack_running_ is still
-    // true and the condition persists, which means the RX channel got
-    // corrupted independently of our own teardown.
     if (this->audio_stack_running_.load(std::memory_order_relaxed)) {
       if (++ctx.invalid_state_errors > 100) {
-        ESP_LOGE(TAG, "Persistent I2S RX INVALID_STATE (%d) - channel corrupted",
-                 ctx.invalid_state_errors);
+        ESP_LOGE(TAG, "Persistent I2S RX INVALID_STATE during %s (%d) - channel corrupted",
+                 label, ctx.invalid_state_errors);
         this->has_i2s_error_.store(true, std::memory_order_relaxed);
         this->audio_stack_running_.store(false, std::memory_order_relaxed);
       }
     }
-    return;
+    return false;
   }
   if (!read_ok) {
 #ifdef USE_ESP_AUDIO_STACK_HARDWARE_CODEC
-    LOG_W_THROTTLED("GMF codec IO read failed");
+    LOG_W_THROTTLED("GMF codec IO %s read failed", label);
 #else
-    LOG_W_THROTTLED("I2S read failed: err=%s bytes=%u/%u", esp_err_to_name(read_err),
-                    static_cast<unsigned>(bytes_read), static_cast<unsigned>(ctx.rx_frame_bytes));
+    LOG_W_THROTTLED("I2S %s read failed: err=%s bytes=%u/%u", label, esp_err_to_name(read_err),
+                    static_cast<unsigned>(bytes_read),
+                    static_cast<unsigned>(ctx.rx_frame_bytes));
 #endif
     if (++ctx.consecutive_i2s_errors > 100) {
-      ESP_LOGE(TAG, "Persistent I2S read errors (%d)", ctx.consecutive_i2s_errors);
+      ESP_LOGE(TAG, "Persistent I2S %s read errors (%d)", label, ctx.consecutive_i2s_errors);
       this->has_i2s_error_.store(true, std::memory_order_relaxed);
       this->audio_stack_running_.store(false, std::memory_order_relaxed);
     }
-    return;
+    return false;
   }
-
   ctx.consecutive_i2s_errors = 0;
   ctx.invalid_state_errors = 0;
+  return true;
+}
+
+void ESPAudioStack::fail_audio_session_(const char *stage) {
+  ESP_LOGE(TAG, "%s failed; stopping audio session", stage);
+  this->has_i2s_error_.store(true, std::memory_order_relaxed);
+  this->audio_stack_running_.store(false, std::memory_order_relaxed);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// RX PATH: I2S read -> deinterleave/rate-convert -> mic_buffer + spk_ref_buffer
+// ════════════════════════════════════════════════════════════════════════════
+void ESPAudioStack::process_rx_path_(AudioTaskCtx &ctx) {
+  if (!this->read_rx_frame_(ctx, "audio"))
+    return;
 
 #ifdef USE_ESP_AUDIO_STACK_TDM_BUS
-  if (ctx.use_tdm_bus) {
+  if (ctx.use_tdm_bus && ctx.any_tdm_slot_level_sensor_enabled) {
     this->update_tdm_slot_levels_(ctx);
   }
 #endif
 
   ctx.output_buffer = ctx.mic_buffer;  // Default: no AEC processing
   ctx.processor_input = ctx.mic_buffer;
-  bool rx_path_converted = false;
+  if (!this->convert_rx_frame_(ctx)) {
+    return;
+  }
+  this->apply_input_conditioning_(ctx);
+}
+
+bool ESPAudioStack::convert_rx_frame_(AudioTaskCtx &ctx) {
+  switch (ctx.rx_path_kind) {
+    case RxPathKind::PASSTHROUGH:
+      return this->process_rx_passthrough_(ctx);
+    case RxPathKind::MONO_EFFECTS:
+      return this->process_rx_mono_effects_(ctx);
+    case RxPathKind::STEREO_SLOT:
+      return this->process_rx_stereo_slot_(ctx);
+    case RxPathKind::STEREO_REF:
+      return this->process_rx_stereo_ref_(ctx);
+    case RxPathKind::TDM:
+      return this->process_rx_tdm_(ctx);
+  }
+  return false;
+}
+
+bool ESPAudioStack::process_rx_passthrough_(AudioTaskCtx &ctx) {
+  (void) ctx;
+  return true;
+}
 
 #if SOC_I2S_SUPPORTS_TDM && defined(USE_ESP_AUDIO_STACK_TDM_BUS)
-  if (ctx.use_tdm_bus) {
-    const uint8_t ts = ctx.tdm_total_slots;
-    const bool dual_mic = ctx.processor_mic_channels > 1 && ctx.tdm_second_mic_slot >= 0;
-    uint8_t ch_offsets[MAX_RATE_CVT_CHANNELS];
-    uint8_t num_mic_ch = dual_mic ? 2 : 1;
-    uint8_t selected_channels = 0;
-    if (dual_mic) {
-      ch_offsets[selected_channels++] = ctx.tdm_mic_slot;
-      ch_offsets[selected_channels++] = static_cast<uint8_t>(ctx.tdm_second_mic_slot);
-    } else {
-      ch_offsets[selected_channels++] = ctx.tdm_mic_slot;
-    }
-    if (ctx.use_tdm_ref) {
-      ch_offsets[selected_channels++] = ctx.tdm_ref_slot;
-    }
-    if (selected_channels != ctx.rx_rate_converter_channels) {
-      conversion_fail("TDM RX channel map");
-      return;
-    }
-    int16_t *ref_out = ctx.use_tdm_ref ? ctx.spk_ref_buffer : nullptr;
-    if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
-      if (!this->rx_rate_converter_.process_multi_32(src32, ctx.input_frame_size, ts, ch_offsets,
-              dual_mic ? ctx.processor_mic_buffer : nullptr, ctx.mic_buffer,
-              ref_out, num_mic_ch)) {
-        conversion_fail("TDM RX audio-effects conversion");
-        return;
-      }
-    } else {
-      if (!this->rx_rate_converter_.process_multi(ctx.rx_buffer, ctx.input_frame_size, ts, ch_offsets,
-              dual_mic ? ctx.processor_mic_buffer : nullptr, ctx.mic_buffer,
-              ref_out, num_mic_ch)) {
-        conversion_fail("TDM RX audio-effects conversion");
-        return;
-      }
-    }
-    if (dual_mic) {
-      ctx.processor_input = ctx.processor_mic_buffer;
-    }
-    rx_path_converted = true;
+bool ESPAudioStack::process_rx_tdm_(AudioTaskCtx &ctx) {
+  const uint8_t ts = ctx.tdm_total_slots;
+  const bool dual_mic = ctx.processor_mic_channels > 1 && ctx.tdm_second_mic_slot >= 0;
+  uint8_t ch_offsets[MAX_RATE_CVT_CHANNELS];
+  uint8_t num_mic_ch = dual_mic ? 2 : 1;
+  uint8_t selected_channels = 0;
+  if (dual_mic) {
+    ch_offsets[selected_channels++] = ctx.tdm_mic_slot;
+    ch_offsets[selected_channels++] = static_cast<uint8_t>(ctx.tdm_second_mic_slot);
+  } else {
+    ch_offsets[selected_channels++] = ctx.tdm_mic_slot;
   }
-#endif
-#ifdef USE_ESP_AUDIO_STACK_STEREO_REF
-  if (!rx_path_converted && ctx.use_stereo_aec_ref) {
-    // Stereo: mic + ref via multi-channel rate conversion.
-    const uint8_t mi = ctx.ref_channel_right ? 0 : 1;
-    const uint8_t ri = ctx.ref_channel_right ? 1 : 0;
-    uint8_t ch_offsets[2] = {mi, ri};
-    if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
-      if (!this->rx_rate_converter_.process_multi_32(src32, ctx.input_frame_size, 2, ch_offsets,
-              nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1)) {
-        conversion_fail("stereo RX audio-effects conversion");
-        return;
-      }
-    } else {
-      if (!this->rx_rate_converter_.process_multi(ctx.rx_buffer, ctx.input_frame_size, 2, ch_offsets,
-              nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1)) {
-        conversion_fail("stereo RX audio-effects conversion");
-        return;
-      }
-    }
-    rx_path_converted = true;
+  if (ctx.use_tdm_ref) {
+    ch_offsets[selected_channels++] = ctx.tdm_ref_slot;
   }
-#endif
-#ifdef USE_ESP_AUDIO_STACK_MULTI_RX
-  if (!rx_path_converted && ctx.rx_slot_mode_stereo) {
-    // Some STD MEMS microphones emit only one slot but require a normal stereo
-    // LRCLK/BCLK frame on the wire. Read both slots, then expose the selected
-    // slot as a mono microphone stream to ESPHome/processor consumers.
-    const uint8_t mic_offset = this->mic_channel_right_ ? 1 : 0;
-    uint8_t ch_offsets[1] = {mic_offset};
-    if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
-      if (!this->rx_rate_converter_.process_multi_32(src32, ctx.input_frame_size, 2, ch_offsets,
-              nullptr, ctx.mic_buffer, nullptr, 1)) {
-        conversion_fail("stereo mic RX 32-bit audio-effects conversion");
-        return;
-      }
-    } else {
-      if (!this->rx_rate_converter_.process_multi(ctx.rx_buffer, ctx.input_frame_size, 2, ch_offsets,
-              nullptr, ctx.mic_buffer, nullptr, 1)) {
-        conversion_fail("stereo mic RX audio-effects conversion");
-        return;
-      }
-    }
-    rx_path_converted = true;
+  if (selected_channels != ctx.rx_rate_converter_channels) {
+    this->fail_audio_session_("TDM RX channel map");
+    return false;
   }
-#endif
-#ifdef USE_ESP_AUDIO_STACK_MONO_RX
-  if (!rx_path_converted && (ctx.ratio > 1 || ctx.i2s_bps == 4)) {
-    // Mono conversion: rate conversion and/or 32-bit -> 16-bit are handled by
-    // esp_audio_effects. No manual top-16 extraction path remains.
-    if (ctx.i2s_bps == 4) {
-      auto *src32 = reinterpret_cast<const int32_t *>(ctx.rx_buffer);
-      if (!this->mic_rate_converter_.process_strided_32(src32, ctx.mic_buffer, ctx.input_frame_size, 1, 0)) {
-        conversion_fail("mono RX 32-bit audio-effects conversion");
-        return;
-      }
-    } else if (ctx.ratio > 1) {
-      if (!this->mic_rate_converter_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size)) {
-        conversion_fail("mono RX rate conversion");
-        return;
-      }
-    }
-    rx_path_converted = true;
+  int16_t *ref_out = ctx.use_tdm_ref ? ctx.spk_ref_buffer : nullptr;
+  const bool ok = ctx.i2s_bps == 4
+      ? this->rx_rate_converter_.process_multi_32(reinterpret_cast<const int32_t *>(ctx.rx_buffer),
+            ctx.input_frame_size, ts, ch_offsets, dual_mic ? ctx.processor_mic_buffer : nullptr,
+            ctx.mic_buffer, ref_out, num_mic_ch)
+      : this->rx_rate_converter_.process_multi(ctx.rx_buffer, ctx.input_frame_size, ts, ch_offsets,
+            dual_mic ? ctx.processor_mic_buffer : nullptr, ctx.mic_buffer, ref_out, num_mic_ch);
+  if (!ok) {
+    this->fail_audio_session_("TDM RX audio-effects conversion");
+    return false;
   }
+  if (dual_mic) {
+    ctx.processor_input = ctx.processor_mic_buffer;
+  }
+  return true;
+}
 #else
-  (void) rx_path_converted;
+bool ESPAudioStack::process_rx_tdm_(AudioTaskCtx &ctx) {
+  (void) ctx;
+  this->fail_audio_session_("TDM RX unsupported");
+  return false;
+}
 #endif
-  // else: mono without rate conversion: mic_buffer == rx_buffer (aliased), nothing to do.
 
+#ifdef USE_ESP_AUDIO_STACK_STEREO_REF
+bool ESPAudioStack::process_rx_stereo_ref_(AudioTaskCtx &ctx) {
+  const uint8_t mi = ctx.ref_channel_right ? 0 : 1;
+  const uint8_t ri = ctx.ref_channel_right ? 1 : 0;
+  uint8_t ch_offsets[2] = {mi, ri};
+  const bool ok = ctx.i2s_bps == 4
+      ? this->rx_rate_converter_.process_multi_32(reinterpret_cast<const int32_t *>(ctx.rx_buffer),
+            ctx.input_frame_size, 2, ch_offsets, nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1)
+      : this->rx_rate_converter_.process_multi(ctx.rx_buffer, ctx.input_frame_size, 2, ch_offsets,
+            nullptr, ctx.mic_buffer, ctx.spk_ref_buffer, 1);
+  if (!ok) {
+    this->fail_audio_session_("stereo RX audio-effects conversion");
+    return false;
+  }
+  return true;
+}
+#else
+bool ESPAudioStack::process_rx_stereo_ref_(AudioTaskCtx &ctx) {
+  (void) ctx;
+  this->fail_audio_session_("stereo RX reference unsupported");
+  return false;
+}
+#endif
+
+#ifdef USE_ESP_AUDIO_STACK_MULTI_RX
+bool ESPAudioStack::process_rx_stereo_slot_(AudioTaskCtx &ctx) {
+  const uint8_t mic_offset = this->mic_channel_right_ ? 1 : 0;
+  uint8_t ch_offsets[1] = {mic_offset};
+  const bool ok = ctx.i2s_bps == 4
+      ? this->rx_rate_converter_.process_multi_32(reinterpret_cast<const int32_t *>(ctx.rx_buffer),
+            ctx.input_frame_size, 2, ch_offsets, nullptr, ctx.mic_buffer, nullptr, 1)
+      : this->rx_rate_converter_.process_multi(ctx.rx_buffer, ctx.input_frame_size, 2, ch_offsets,
+            nullptr, ctx.mic_buffer, nullptr, 1);
+  if (!ok) {
+    this->fail_audio_session_(ctx.i2s_bps == 4
+        ? "stereo mic RX 32-bit audio-effects conversion"
+        : "stereo mic RX audio-effects conversion");
+    return false;
+  }
+  return true;
+}
+#else
+bool ESPAudioStack::process_rx_stereo_slot_(AudioTaskCtx &ctx) {
+  (void) ctx;
+  this->fail_audio_session_("stereo mic RX unsupported");
+  return false;
+}
+#endif
+
+#ifdef USE_ESP_AUDIO_STACK_MONO_RX
+bool ESPAudioStack::process_rx_mono_effects_(AudioTaskCtx &ctx) {
+  bool ok = true;
+  if (ctx.i2s_bps == 4) {
+    ok = this->mic_rate_converter_.process_strided_32(reinterpret_cast<const int32_t *>(ctx.rx_buffer),
+                                                      ctx.mic_buffer, ctx.input_frame_size, 1, 0);
+  } else if (ctx.ratio > 1) {
+    ok = this->mic_rate_converter_.process(ctx.rx_buffer, ctx.mic_buffer, ctx.bus_frame_size);
+  }
+  if (!ok) {
+    this->fail_audio_session_(ctx.i2s_bps == 4
+        ? "mono RX 32-bit audio-effects conversion"
+        : "mono RX rate conversion");
+    return false;
+  }
+  return true;
+}
+#else
+bool ESPAudioStack::process_rx_mono_effects_(AudioTaskCtx &ctx) {
+  (void) ctx;
+  this->fail_audio_session_("mono RX audio-effects unsupported");
+  return false;
+}
+#endif
+
+void ESPAudioStack::apply_input_conditioning_(AudioTaskCtx &ctx) {
   // Fused loop: DC offset + input gain staging in one pass when DC or positive
   // boost is needed. Pure input attenuation uses esp-audio-libs Q31 below.
   // For dual-mic: mic1 is in mic_buffer, mic2 is in processor_mic_buffer[i*2+1]
@@ -1124,11 +1220,12 @@ void ESPAudioStack::run_processor_(AudioTaskCtx &ctx) {
 // ════════════════════════════════════════════════════════════════════════════
 // AEC/AFE + CALLBACKS: processing → gain → post-processor callbacks
 // ════════════════════════════════════════════════════════════════════════════
-void ESPAudioStack::process_aec_and_callbacks_(AudioTaskCtx &ctx) {
-  if (!this->rx_handle_ || ctx.output_buffer == nullptr)
-    return;
+bool ESPAudioStack::can_dispatch_mic_frame_(const AudioTaskCtx &ctx) const {
+  return this->rx_handle_ != nullptr && ctx.output_buffer != nullptr && ctx.mic_running;
+}
 
-  if (!ctx.mic_running)
+void ESPAudioStack::process_aec_and_callbacks_(AudioTaskCtx &ctx) {
+  if (!this->can_dispatch_mic_frame_(ctx))
     return;
 
 #ifdef USE_AUDIO_PROCESSOR
@@ -1229,9 +1326,14 @@ void ESPAudioStack::process_aec_and_callbacks_(AudioTaskCtx &ctx) {
   }
 #endif
 
-  // Apply post-processor mic gain. Attenuation follows ESPHome/esp-audio-libs
-  // Q31; positive dB boost needs the local saturating path because Q31 gain
-  // intentionally clamps at unity.
+  this->apply_post_processor_gain_(ctx);
+  this->dispatch_mic_callbacks_(ctx);
+}
+
+void ESPAudioStack::apply_post_processor_gain_(AudioTaskCtx &ctx) {
+  if (ctx.output_buffer == nullptr)
+    return;
+
   if (ctx.mic_gain_q31 != INT32_MAX) {
     auto *output_bytes = reinterpret_cast<uint8_t *>(ctx.output_buffer);
     if (ctx.mic_gain_q31 == 0) {
@@ -1245,11 +1347,16 @@ void ESPAudioStack::process_aec_and_callbacks_(AudioTaskCtx &ctx) {
     this->apply_mic_alc_gain_(ctx.output_buffer, ctx.current_output_frame_size,
                               ctx.mic_gain_boost_db);
   }
+}
 
-  // Post-AEC callbacks (VA/STT)
-  if (ctx.mic_running) {
-    for (auto &callback : this->mic_callbacks_) {
-      callback((const uint8_t *) ctx.output_buffer, ctx.current_output_frame_bytes);
+void ESPAudioStack::dispatch_mic_callbacks_(const AudioTaskCtx &ctx) {
+  if (!ctx.mic_running || ctx.output_buffer == nullptr)
+    return;
+
+  for (size_t i = 0; i < this->mic_callback_count_; i++) {
+    const auto &slot = this->mic_callbacks_[i];
+    if (slot.fn != nullptr) {
+      slot.fn(slot.ctx, (const uint8_t *) ctx.output_buffer, ctx.current_output_frame_bytes);
     }
   }
 }
@@ -1378,7 +1485,6 @@ bool ESPAudioStack::format_tx_frame_(AudioTaskCtx &ctx, void **tx_data, size_t *
       ESP_LOGE(TAG, "missing TDM TX audio-effects buffers");
       return false;
     }
-    memset(ctx.tx_silence_buffer, 0, ctx.bus_frame_bytes);
     esp_ae_sample_t slot_samples[8]{};
     for (uint8_t slot = 0; slot < tx_channels; slot++) {
       slot_samples[slot] = ctx.tx_silence_buffer;
@@ -1450,6 +1556,63 @@ bool ESPAudioStack::format_tx_frame_(AudioTaskCtx &ctx, void **tx_data, size_t *
 // ════════════════════════════════════════════════════════════════════════════
 // TX PATH: ring buffer read → volume → Espressif format conversion → I2S write
 // ════════════════════════════════════════════════════════════════════════════
+bool ESPAudioStack::write_tx_frame_(AudioTaskCtx &ctx, void *tx_data, size_t tx_bytes) {
+#ifdef USE_ESP_AUDIO_STACK_HARDWARE_CODEC
+  const bool write_ok = this->codec_backend_.write(tx_data, tx_bytes);
+  const bool io_closed = !this->codec_backend_.is_open();
+#else
+  size_t bytes_written = 0;
+  const esp_err_t write_err = i2s_channel_write(this->tx_handle_, tx_data, tx_bytes,
+                                                &bytes_written, portMAX_DELAY);
+  const bool write_ok = write_err == ESP_OK && bytes_written == tx_bytes;
+  const bool io_closed = write_err == ESP_ERR_INVALID_STATE;
+#endif
+  if (!write_ok && io_closed) {
+    if (this->audio_stack_running_.load(std::memory_order_relaxed)) {
+      if (++ctx.invalid_state_errors > 100) {
+        ESP_LOGE(TAG, "Persistent I2S TX INVALID_STATE (%d) - channel corrupted",
+                 ctx.invalid_state_errors);
+        this->has_i2s_error_.store(true, std::memory_order_relaxed);
+        this->audio_stack_running_.store(false, std::memory_order_relaxed);
+      }
+    }
+    return false;
+  }
+  if (!write_ok) {
+#ifdef USE_ESP_AUDIO_STACK_HARDWARE_CODEC
+    LOG_W_THROTTLED("GMF codec IO write failed");
+#else
+    LOG_W_THROTTLED("I2S write failed: err=%s bytes=%u/%u", esp_err_to_name(write_err),
+                    static_cast<unsigned>(bytes_written), static_cast<unsigned>(tx_bytes));
+#endif
+    if (++ctx.consecutive_i2s_errors > 100) {
+      ESP_LOGE(TAG, "Persistent I2S write errors (%d)", ctx.consecutive_i2s_errors);
+      this->has_i2s_error_.store(true, std::memory_order_relaxed);
+      this->audio_stack_running_.store(false, std::memory_order_relaxed);
+    }
+    return false;
+  }
+
+  ctx.consecutive_i2s_errors = 0;
+  ctx.invalid_state_errors = 0;
+  return true;
+}
+
+void ESPAudioStack::process_tx_clock_only_(AudioTaskCtx &ctx) {
+  if (!this->tx_handle_ || ctx.tx_clock_buffer == nullptr)
+    return;
+
+  const size_t tx_bytes = ctx.use_tdm_bus
+      ? ctx.tdm_tx_frame_bytes
+      : ctx.bus_frame_size * ctx.num_ch * ctx.i2s_bps;
+  ctx.speaker_got = 0;
+  ctx.speaker_underrun = false;
+#ifdef USE_ESP_AUDIO_STACK_TDM_REF_DIAGNOSTIC
+  ctx.current_speaker_dbfs = -120.0f;
+#endif
+  this->write_tx_frame_(ctx, ctx.tx_clock_buffer, tx_bytes);
+}
+
 void ESPAudioStack::process_tx_path_(AudioTaskCtx &ctx) {
   if (!this->tx_handle_)
     return;
@@ -1579,50 +1742,19 @@ void ESPAudioStack::process_tx_path_(AudioTaskCtx &ctx) {
     return;
   }
 
-#ifdef USE_ESP_AUDIO_STACK_HARDWARE_CODEC
-  const bool write_ok = this->codec_backend_.write(tx_data, tx_bytes);
-  const bool io_closed = !this->codec_backend_.is_open();
-#else
-  size_t bytes_written = 0;
-  const esp_err_t write_err = i2s_channel_write(this->tx_handle_, tx_data, tx_bytes,
-                                                &bytes_written, portMAX_DELAY);
-  const bool write_ok = write_err == ESP_OK && bytes_written == tx_bytes;
-  const bool io_closed = write_err == ESP_ERR_INVALID_STATE;
-#endif
-  if (!write_ok && io_closed) {
-    if (this->audio_stack_running_.load(std::memory_order_relaxed)) {
-      if (++ctx.invalid_state_errors > 100) {
-        ESP_LOGE(TAG, "Persistent I2S TX INVALID_STATE (%d) - channel corrupted",
-                 ctx.invalid_state_errors);
-        this->has_i2s_error_.store(true, std::memory_order_relaxed);
-        this->audio_stack_running_.store(false, std::memory_order_relaxed);
-      }
-    }
-  } else if (!write_ok) {
-#ifdef USE_ESP_AUDIO_STACK_HARDWARE_CODEC
-    LOG_W_THROTTLED("GMF codec IO write failed");
-#else
-    LOG_W_THROTTLED("I2S write failed: err=%s bytes=%u/%u", esp_err_to_name(write_err),
-                    static_cast<unsigned>(bytes_written), static_cast<unsigned>(tx_bytes));
-#endif
-    if (++ctx.consecutive_i2s_errors > 100) {
-      ESP_LOGE(TAG, "Persistent I2S write errors (%d)", ctx.consecutive_i2s_errors);
-      this->has_i2s_error_.store(true, std::memory_order_relaxed);
-      this->audio_stack_running_.store(false, std::memory_order_relaxed);
-    }
-  } else {
-    ctx.consecutive_i2s_errors = 0;
-    ctx.invalid_state_errors = 0;
-  }
+  const bool write_ok = this->write_tx_frame_(ctx, tx_data, tx_bytes);
 
   // Report frames actually consumed from the ring buffer (not silence/pad frames).
   // Using got (ring buffer read) instead of bytes_written (I2S output) prevents
   // counting silence frames as "played" during underruns.
-  if (write_ok && ctx.speaker_got > 0 && !this->speaker_output_callbacks_.empty()) {
+  if (write_ok && ctx.speaker_got > 0 && this->speaker_output_callback_count_ > 0) {
     uint32_t frames_played = ctx.speaker_got / (sizeof(int16_t) * ctx.speaker_channels);
     int64_t timestamp = esp_timer_get_time();
-    for (auto &cb : this->speaker_output_callbacks_) {
-      cb(frames_played, timestamp);
+    for (size_t i = 0; i < this->speaker_output_callback_count_; i++) {
+      const auto &slot = this->speaker_output_callbacks_[i];
+      if (slot.fn != nullptr) {
+        slot.fn(slot.ctx, frames_played, timestamp);
+      }
     }
   }
 }

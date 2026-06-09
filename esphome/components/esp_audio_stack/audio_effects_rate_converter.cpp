@@ -220,6 +220,10 @@ class RateCvtHandle {
 
  private:
   bool check_(const char *scope, esp_ae_err_t err, uint32_t actual, size_t expected) {
+    // This wrapper intentionally supports exact integer decimation only.
+    // CONFIG_SCHEMA rejects non-integer sample_rate/output_sample_rate pairs.
+    // If non-integer SRC is ever allowed, this check must be redesigned to
+    // propagate variable out_samples through every downstream consumer.
     if (err == ESP_AE_ERR_OK && actual == expected)
       return true;
     ESP_LOGE(TAG, "esp_ae_rate_cvt %s failed/misaligned: err=%d out=%u expected=%u ch=%u",

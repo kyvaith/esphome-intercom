@@ -40,32 +40,6 @@ static bool wait_socket_readable_(int socket, uint32_t timeout_ms) {
   return false;
 }
 
-static void release_self_deleted_task_(TaskHandle_t *handle, StackType_t **stack,
-                                       uint32_t stack_bytes, const char *task_name) {
-  if (handle == nullptr || *handle == nullptr) return;
-
-  bool deleted = false;
-  for (int i = 0; i < 30; i++) {
-    if (eTaskGetState(*handle) == eDeleted) {
-      deleted = true;
-      break;
-    }
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-  if (!deleted) {
-    ESP_LOGE(TAG, "%s did not self-delete within 300ms; leaking stack to avoid UAF", task_name);
-    return;
-  }
-
-  if (stack != nullptr && *stack != nullptr) {
-    const uint32_t stack_words = (stack_bytes + sizeof(StackType_t) - 1) / sizeof(StackType_t);
-    auto alloc = audio_processor::psram_allocator<StackType_t>();
-    alloc.deallocate(*stack, stack_words);
-    *stack = nullptr;
-  }
-  *handle = nullptr;
-}
-
 UdpTransport::UdpTransport(uint16_t listen_port, std::string remote_ip,
                             uint16_t remote_port, uint16_t control_port,
                             uint16_t remote_control_port,
@@ -160,9 +134,7 @@ bool UdpTransport::start() {
            (unsigned) this->remote_port_.load(std::memory_order_acquire),
            (unsigned) this->remote_control_port_.load(std::memory_order_acquire));
 
-  if (this->on_connection_change) {
-    this->on_connection_change(true);
-  }
+  this->emit_connection_change_(true);
   return true;
 }
 
@@ -211,14 +183,28 @@ bool UdpTransport::start_audio_path() {
 }
 
 void UdpTransport::stop_audio_path() {
-  if (!this->audio_active_.exchange(false, std::memory_order_acq_rel)) return;
+  const bool wait_for_recv = this->recv_task_handle_ != nullptr;
+  if (wait_for_recv) {
+    TaskHandle_t waiter = xTaskGetCurrentTaskHandle();
+    ulTaskNotifyTake(pdTRUE, 0);
+    this->recv_stop_waiter_.store(waiter, std::memory_order_release);
+  }
 
-  // recv_task_() self-deletes via vTaskDelete(nullptr); calling
-  // vTaskDelete(handle) again would panic on the freed TCB. Wait for
-  // eDeleted, then free the stack. On timeout we leak the ~8 KB stack
-  // rather than risk UAF.
-  release_self_deleted_task_(&this->recv_task_handle_, &this->recv_task_stack_,
-                             kRecvTaskStackBytes, "recv_task");
+  if (!this->audio_active_.exchange(false, std::memory_order_acq_rel)) {
+    if (wait_for_recv) {
+      this->recv_stop_waiter_.store(nullptr, std::memory_order_release);
+    }
+    return;
+  }
+
+  if (wait_for_recv) {
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(300)) == 0) {
+      ESP_LOGE(TAG, "recv_task did not stop within 300ms; leaking stack to avoid UAF");
+    }
+    this->recv_stop_waiter_.store(nullptr, std::memory_order_release);
+  }
+  audio_processor::cleanup_pinned_task(&this->recv_task_handle_, &this->recv_task_stack_,
+                                       kRecvTaskStackBytes);
   if (this->audio_socket_ >= 0) {
     close(this->audio_socket_);
     this->audio_socket_ = -1;
@@ -229,22 +215,37 @@ void UdpTransport::stop_audio_path() {
 void UdpTransport::stop() {
   this->stop_audio_path();
 
-  if (!this->running_.exchange(false, std::memory_order_acq_rel)) return;
+  const bool wait_for_ctrl = this->ctrl_task_handle_ != nullptr;
+  if (wait_for_ctrl) {
+    TaskHandle_t waiter = xTaskGetCurrentTaskHandle();
+    ulTaskNotifyTake(pdTRUE, 0);
+    this->ctrl_stop_waiter_.store(waiter, std::memory_order_release);
+  }
+
+  if (!this->running_.exchange(false, std::memory_order_acq_rel)) {
+    if (wait_for_ctrl) {
+      this->ctrl_stop_waiter_.store(nullptr, std::memory_order_release);
+    }
+    return;
+  }
 
   this->active_.store(false, std::memory_order_release);
 
-  // Same self-delete pattern as stop_audio_path.
-  release_self_deleted_task_(&this->ctrl_task_handle_, &this->ctrl_task_stack_,
-                             kCtrlTaskStackBytes, "ctrl_task");
+  if (wait_for_ctrl) {
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(300)) == 0) {
+      ESP_LOGE(TAG, "ctrl_task did not stop within 300ms; leaking stack to avoid UAF");
+    }
+    this->ctrl_stop_waiter_.store(nullptr, std::memory_order_release);
+  }
+  audio_processor::cleanup_pinned_task(&this->ctrl_task_handle_, &this->ctrl_task_stack_,
+                                       kCtrlTaskStackBytes);
 
   if (this->control_socket_ >= 0) {
     close(this->control_socket_);
     this->control_socket_ = -1;
   }
 
-  if (this->on_connection_change) {
-    this->on_connection_change(false);
-  }
+  this->emit_connection_change_(false);
 }
 
 bool UdpTransport::is_connected() const {
@@ -372,9 +373,7 @@ void UdpTransport::recv_task_() {
         ESP_LOGD(TAG, "Dropping UDP audio from non-current peer %s", src_ip);
         continue;
       }
-      if (this->on_audio_frame) {
-        this->on_audio_frame(rx, static_cast<size_t>(n));
-      }
+      this->emit_audio_frame_(rx, static_cast<size_t>(n));
       continue;
     }
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -383,6 +382,10 @@ void UdpTransport::recv_task_() {
   }
 
   ESP_LOGD(TAG, "UDP audio recv task exiting");
+  TaskHandle_t waiter = this->recv_stop_waiter_.load(std::memory_order_acquire);
+  if (waiter != nullptr) {
+    xTaskNotifyGive(waiter);
+  }
   vTaskDelete(nullptr);
 }
 
@@ -446,11 +449,7 @@ void UdpTransport::ctrl_task_() {
           this->remote_control_port_.store(src_control_port, std::memory_order_release);
         }
       }
-      if (this->on_control) {
-        this->on_control(type,
-                         payload_len > 0 ? rx + HEADER_SIZE : nullptr,
-                         payload_len);
-      }
+      this->emit_control_(type, payload_len > 0 ? rx + HEADER_SIZE : nullptr, payload_len);
       continue;
     }
     if (n >= 0 && n < static_cast<ssize_t>(HEADER_SIZE)) {
@@ -461,6 +460,10 @@ void UdpTransport::ctrl_task_() {
   }
 
   ESP_LOGD(TAG, "UDP control recv task exiting");
+  TaskHandle_t waiter = this->ctrl_stop_waiter_.load(std::memory_order_acquire);
+  if (waiter != nullptr) {
+    xTaskNotifyGive(waiter);
+  }
   vTaskDelete(nullptr);
 }
 

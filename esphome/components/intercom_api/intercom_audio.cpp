@@ -16,6 +16,7 @@ namespace esphome {
 namespace intercom_api {
 
 static const char *const TAG = "intercom_api.audio";
+static constexpr uint8_t MAX_TX_BURST = 4;
 
 void IntercomApi::debug_log_pcm_level_(const char *label, const uint8_t *pcm, size_t bytes,
                                        uint32_t &last_log_ms, uint32_t &frame_count) {
@@ -120,24 +121,30 @@ void IntercomApi::tx_task_() {
   uint8_t *const audio_chunk = this->tx_audio_chunk_;
 
   while (true) {
-    if (!this->is_tx_stream_ready_()) {
+    if (!this->is_tx_stream_ready_() || this->mic_buffer_->available() < AUDIO_CHUNK_BYTES) {
       ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
       continue;
     }
 
-    if (this->mic_buffer_->available() < AUDIO_CHUNK_BYTES) {
-      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-      continue;
-    }
-
-    const uint8_t *chunk_data = nullptr;
-    void *release_item = nullptr;
-    if (this->read_tx_chunk_(audio_chunk, &chunk_data, &release_item)) {
+    uint8_t burst = 0;
+    while (this->is_tx_stream_ready_() && this->mic_buffer_->available() >= AUDIO_CHUNK_BYTES &&
+           burst < MAX_TX_BURST) {
+      const uint8_t *chunk_data = nullptr;
+      void *release_item = nullptr;
+      if (!this->read_tx_chunk_(audio_chunk, &chunk_data, &release_item)) {
+        break;
+      }
       this->process_tx_chunk_(chunk_data);
       if (release_item != nullptr) {
         this->mic_buffer_->receive_release(release_item);
       }
-      delay(1);
+      burst++;
+    }
+
+    if (burst == 0) {
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
+    } else if (burst >= MAX_TX_BURST) {
+      vTaskDelay(1);
     }
   }
 }

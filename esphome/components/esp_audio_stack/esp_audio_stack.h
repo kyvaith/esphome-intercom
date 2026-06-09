@@ -27,7 +27,6 @@
 #include <climits>
 #include <cstdint>
 #include <cstring>
-#include <functional>
 #include <memory>
 #include <string>
 
@@ -48,10 +47,20 @@ static constexpr UBaseType_t MAX_LISTENERS = 16;
 // IMPORTANT: Callbacks are invoked from the audio task (high priority, Core 0).
 // They MUST NOT block, allocate memory, do network I/O, or hold locks.
 // Target completion: <1ms to avoid I2S DMA underruns.
-using MicDataCallback = std::function<void(const uint8_t *data, size_t len)>;
+using MicDataCallback = void (*)(void *ctx, const uint8_t *data, size_t len);
 // Callback type for speaker output: reports frames played and timestamp (for mixer pending_playback tracking).
 // Same real-time constraints as MicDataCallback apply.
-using SpeakerOutputCallback = std::function<void(uint32_t frames, int64_t timestamp)>;
+using SpeakerOutputCallback = void (*)(void *ctx, uint32_t frames, int64_t timestamp);
+
+struct MicCallbackSlot {
+  MicDataCallback fn{nullptr};
+  void *ctx{nullptr};
+};
+
+struct SpeakerOutputCallbackSlot {
+  SpeakerOutputCallback fn{nullptr};
+  void *ctx{nullptr};
+};
 
 enum class AudioStackRuntimeState : uint8_t {
   IDLE = 0,
@@ -67,6 +76,14 @@ enum class I2SHardwareState : uint8_t {
   RUNNING = 3,
   STOPPING = 4,
   ERROR = 5,
+};
+
+enum class RxPathKind : uint8_t {
+  PASSTHROUGH = 0,
+  MONO_EFFECTS = 1,
+  STEREO_SLOT = 2,
+  STEREO_REF = 3,
+  TDM = 4,
 };
 
 static constexpr uint8_t MAX_RATE_CVT_CHANNELS = 3;
@@ -309,7 +326,13 @@ class ESPAudioStack : public Component {
   void set_tdm_ref_slot(uint8_t slot) { this->tdm_ref_slot_ = slot; }
   void set_tdm_tx_slot(uint8_t slot) { this->tdm_tx_slot_ = slot; }
   void set_tdm_slot_level_sensor_enabled(uint8_t slot, bool enabled) {
-    if (slot < 8) this->tdm_slot_level_sensor_enabled_[slot] = enabled;
+    if (slot >= 8) return;
+    this->tdm_slot_level_sensor_enabled_[slot] = enabled;
+    bool any = false;
+    for (bool slot_enabled : this->tdm_slot_level_sensor_enabled_) {
+      any = any || slot_enabled;
+    }
+    this->any_tdm_slot_level_sensor_enabled_.store(any, std::memory_order_relaxed);
   }
   float get_tdm_slot_level_dbfs(uint8_t slot) const {
     if (slot >= 8) return -120.0f;
@@ -317,7 +340,12 @@ class ESPAudioStack : public Component {
   }
 
   // Microphone interface
-  void add_mic_data_callback(MicDataCallback callback) { this->mic_callbacks_.push_back(callback); }
+  bool add_mic_data_callback(MicDataCallback callback, void *ctx) {
+    if (callback == nullptr) return false;
+    if (this->mic_callback_count_ >= MAX_LISTENERS) return false;
+    this->mic_callbacks_[this->mic_callback_count_++] = MicCallbackSlot{callback, ctx};
+    return true;
+  }
 
   // Consumer registry: each consumer (a microphone wrapper, intercom TX path,
   // etc.) registers an opaque token. The audio task gates mic callbacks on
@@ -360,8 +388,12 @@ class ESPAudioStack : public Component {
   Trigger<> *get_speaker_idle_trigger() { return &this->speaker_idle_trigger_; }
 
   // Speaker output callback registration (for mixer pending_playback_frames tracking)
-  void add_speaker_output_callback(SpeakerOutputCallback callback) {
-    this->speaker_output_callbacks_.push_back(std::move(callback));
+  bool add_speaker_output_callback(SpeakerOutputCallback callback, void *ctx) {
+    if (callback == nullptr) return false;
+    if (this->speaker_output_callback_count_ >= MAX_LISTENERS) return false;
+    this->speaker_output_callbacks_[this->speaker_output_callback_count_++] =
+        SpeakerOutputCallbackSlot{callback, ctx};
+    return true;
   }
 
   // Getters for platform wrappers
@@ -473,6 +505,7 @@ class ESPAudioStack : public Component {
     uint8_t processor_mic_channels{1};
     uint32_t processor_spec_revision{0};
     bool processor_spec_loaded{false};
+    RxPathKind rx_path_kind{RxPathKind::PASSTHROUGH};
     uint8_t rx_rate_converter_channels{0};
     bool tdm_ref_active_monitor_logged{false};
 
@@ -501,6 +534,7 @@ class ESPAudioStack : public Component {
     int16_t *tdm_tx_buffer{nullptr};
     int16_t *tx_interleave_buffer{nullptr};
     int16_t *tx_silence_buffer{nullptr};
+    int16_t *tx_clock_buffer{nullptr};
     int16_t *tx_32_buffer{nullptr};
     int16_t *aec_output{nullptr};
 
@@ -521,6 +555,12 @@ class ESPAudioStack : public Component {
     size_t current_output_frame_bytes{0};
     size_t current_output_frame_size{0};
     bool mic_separate{false};         // true if mic_buffer != rx_buffer
+    bool need_rx_processing{false};
+    bool need_rx_drain{false};
+    bool need_tx_audio{false};
+    bool need_tx_clock{false};
+    bool clock_only_tx{false};
+    bool any_tdm_slot_level_sensor_enabled{false};
 
     // ── Per-iteration snapshots from atomics ──
     int8_t mic_gain_boost_db{0};
@@ -545,9 +585,25 @@ class ESPAudioStack : public Component {
   };
 
   // Refactored audio processing functions (called from audio_task_ main loop)
+  void update_runtime_audio_flags_(AudioTaskCtx &ctx);
   void process_rx_path_(AudioTaskCtx &ctx);
+  bool read_rx_frame_(AudioTaskCtx &ctx, const char *label);
+  void fail_audio_session_(const char *stage);
+  bool convert_rx_frame_(AudioTaskCtx &ctx);
+  bool process_rx_passthrough_(AudioTaskCtx &ctx);
+  bool process_rx_mono_effects_(AudioTaskCtx &ctx);
+  bool process_rx_stereo_slot_(AudioTaskCtx &ctx);
+  bool process_rx_stereo_ref_(AudioTaskCtx &ctx);
+  bool process_rx_tdm_(AudioTaskCtx &ctx);
+  void apply_input_conditioning_(AudioTaskCtx &ctx);
+  void drain_rx_minimal_(AudioTaskCtx &ctx);
   void process_aec_and_callbacks_(AudioTaskCtx &ctx);
   void process_tx_path_(AudioTaskCtx &ctx);
+  void process_tx_clock_only_(AudioTaskCtx &ctx);
+  bool write_tx_frame_(AudioTaskCtx &ctx, void *tx_data, size_t tx_bytes);
+  bool can_dispatch_mic_frame_(const AudioTaskCtx &ctx) const;
+  void apply_post_processor_gain_(AudioTaskCtx &ctx);
+  void dispatch_mic_callbacks_(const AudioTaskCtx &ctx);
   bool apply_mic_alc_gain_(int16_t *samples, size_t sample_count, int8_t gain_db);
 #ifdef USE_ESP_AUDIO_STACK_TDM_BUS
   void update_tdm_slot_levels_(const AudioTaskCtx &ctx);
@@ -559,6 +615,7 @@ class ESPAudioStack : public Component {
 #ifdef USE_AUDIO_PROCESSOR
   void run_processor_(AudioTaskCtx &ctx);
 #endif
+  bool wait_audio_task_idle_(uint32_t timeout_ms);
 
 #ifdef USE_ESP_AUDIO_STACK_MONO_REF
   // Fill ctx.spk_ref_buffer for the mono AEC path (ring buffer or previous
@@ -659,9 +716,10 @@ class ESPAudioStack : public Component {
   Trigger<> speaker_start_trigger_;
   Trigger<> speaker_idle_trigger_;
   // audio_task_idle_: true while the task is parked in its outer wait loop
-  //                   (not owning I2S). loop() polls this to know when the
-  //                   task has released the inner processing loop.
+  //                   (not owning I2S). Waiters use audio_idle_waiter_ instead
+  //                   of polling when synchronous maintenance needs the task parked.
   std::atomic<bool> audio_task_idle_{true};
+  std::atomic<TaskHandle_t> audio_idle_waiter_{nullptr};
   TaskHandle_t audio_task_handle_{nullptr};
 
   // Cross-thread buffer operation request (main thread -> audio task, avoids concurrent ring buffer access)
@@ -694,10 +752,12 @@ class ESPAudioStack : public Component {
   int32_t dc_prev_output_secondary_persistent_{0};
 
   // Mic data callbacks
-  std::vector<MicDataCallback> mic_callbacks_;       // Post-processor stream for MWW, VA, intercom
+  MicCallbackSlot mic_callbacks_[MAX_LISTENERS]{};  // Post-processor stream for MWW, VA, intercom
+  size_t mic_callback_count_{0};
 
   // Speaker output callbacks (for mixer pending_playback_frames tracking)
-  std::vector<SpeakerOutputCallback> speaker_output_callbacks_;
+  SpeakerOutputCallbackSlot speaker_output_callbacks_[MAX_LISTENERS]{};
+  size_t speaker_output_callback_count_{0};
 
   // Speaker ring buffer: stores data at bus rate (sample_rate_)
   audio_processor::RingBufferPtr speaker_buffer_;
@@ -747,6 +807,7 @@ class ESPAudioStack : public Component {
   uint8_t tdm_ref_slot_{1};    // TDM slot index for AEC reference
   uint8_t tdm_tx_slot_{0};     // TDM slot index for speaker TX
   bool tdm_slot_level_sensor_enabled_[8] = {false};
+  std::atomic<bool> any_tdm_slot_level_sensor_enabled_{false};
   std::atomic<float> tdm_slot_level_dbfs_[8] = {};
   uint8_t tdm_slot_level_divider_{0};
 
@@ -794,6 +855,7 @@ class ESPAudioStack : public Component {
 #ifdef USE_ESP_AUDIO_STACK_STEREO_TX
   int16_t *prealloc_tx_interleave_buffer_{nullptr};
 #endif
+  int16_t *prealloc_tx_clock_buffer_{nullptr};
 #ifdef USE_ESP_AUDIO_STACK_32BIT
   int16_t *prealloc_tx_32_buffer_{nullptr};
 #endif
@@ -811,6 +873,7 @@ class ESPAudioStack : public Component {
 #ifdef USE_ESP_AUDIO_STACK_STEREO_TX
   size_t prealloc_tx_interleave_buffer_bytes_{0};
 #endif
+  size_t prealloc_tx_clock_buffer_bytes_{0};
 #ifdef USE_ESP_AUDIO_STACK_32BIT
   size_t prealloc_tx_32_buffer_bytes_{0};
 #endif

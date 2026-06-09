@@ -38,8 +38,10 @@ void ESPAudioStackMicrophone::setup() {
 
   // Standard microphone output is always post-processor. MWW, VA and
   // intercom all consume the same cleaned stream.
-  this->parent_->add_mic_data_callback(
-      [this](const uint8_t *data, size_t len) { this->on_audio_data_(data, len); });
+  if (!this->parent_->add_mic_data_callback(ESPAudioStackMicrophone::mic_data_callback_, this)) {
+    ESP_LOGE(TAG, "Failed to register parent mic callback");
+    this->mark_failed();
+  }
 }
 
 void ESPAudioStackMicrophone::dump_config() {
@@ -85,6 +87,10 @@ void ESPAudioStackMicrophone::stop() {
 
   // loop() will process the stop edge; do not block the ESPHome main loop.
   this->enable_loop_soon_any_context();
+}
+
+void ESPAudioStackMicrophone::mic_data_callback_(void *ctx, const uint8_t *data, size_t len) {
+  static_cast<ESPAudioStackMicrophone *>(ctx)->on_audio_data_(data, len);
 }
 
 void ESPAudioStackMicrophone::on_audio_data_(const uint8_t *data, size_t len) {

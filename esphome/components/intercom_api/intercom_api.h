@@ -365,7 +365,12 @@ class IntercomApi : public Component {
   void debug_log_pcm_level_(const char *label, const uint8_t *pcm, size_t bytes,
                             uint32_t &last_log_ms, uint32_t &frame_count);
 
-  // Transport callbacks (registered in setup()).
+	  // Transport callbacks (registered in setup()).
+  static void transport_audio_callback_(void *ctx, const uint8_t *pcm, size_t bytes);
+  static void transport_control_callback_(void *ctx, MessageType type,
+                                          const uint8_t *payload, size_t len);
+  static void transport_connection_callback_(void *ctx, bool connected);
+  static bool transport_accept_callback_(void *ctx);
   void on_audio_received_(const uint8_t *pcm, size_t bytes);
   void on_control_received_(MessageType type,
                             const uint8_t *payload, size_t len);

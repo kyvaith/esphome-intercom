@@ -159,7 +159,7 @@ bool EspAec::process(const int16_t *in_mic, const int16_t *in_ref, int16_t *out,
     memset(out, 0, frame_bytes);
     return false;
   }
-  audio_processor::ScopedLock lock(this->handle_mutex_, pdMS_TO_TICKS(10));
+  audio_processor::ScopedLock lock(this->handle_mutex_, 0);
   if (!lock || this->handle_ == nullptr || this->input_frame_ == nullptr) {
     memset(out, 0, frame_bytes);
     return false;

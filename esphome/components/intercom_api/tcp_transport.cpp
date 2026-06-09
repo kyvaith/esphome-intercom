@@ -62,6 +62,18 @@ bool wait_socket_writable(int socket, uint32_t wait_ms) {
   return ready > 0 && FD_ISSET(socket, &wfds);
 }
 
+bool wait_socket_readable(int socket, uint32_t wait_ms) {
+  if (socket < 0) return false;
+  fd_set rfds;
+  FD_ZERO(&rfds);
+  FD_SET(socket, &rfds);
+  struct timeval tv{};
+  tv.tv_sec = wait_ms / 1000;
+  tv.tv_usec = (wait_ms % 1000) * 1000;
+  int ready = select(socket + 1, &rfds, nullptr, nullptr, &tv);
+  return ready > 0 && FD_ISSET(socket, &rfds);
+}
+
 }  // namespace
 
 TcpTransport::TcpTransport(uint16_t port, bool task_stacks_in_psram)
@@ -144,18 +156,28 @@ bool TcpTransport::start() {
 }
 
 void TcpTransport::stop() {
+  const bool wait_for_server = this->server_task_handle_ != nullptr;
+  if (wait_for_server) {
+    TaskHandle_t waiter = xTaskGetCurrentTaskHandle();
+    ulTaskNotifyTake(pdTRUE, 0);
+    this->server_stop_waiter_.store(waiter, std::memory_order_release);
+  }
+
   if (!this->running_.exchange(false, std::memory_order_acq_rel)) {
+    if (wait_for_server) {
+      this->server_stop_waiter_.store(nullptr, std::memory_order_release);
+    }
     return;
   }
 
-  // Server task polls running_; wake it if it's parked in notify-wait, then
-  // give it ~300 ms to exit cleanly before cleanup_pinned_task force-deletes.
-  if (this->server_task_handle_ != nullptr) {
+  // Wake the server task and wait for its explicit done signal before freeing
+  // a possible PSRAM stack while the task may still be inside lwIP/select.
+  if (wait_for_server) {
     xTaskNotifyGive(this->server_task_handle_);
-    for (int i = 0; i < 30; i++) {
-      if (eTaskGetState(this->server_task_handle_) == eDeleted) break;
-      vTaskDelay(pdMS_TO_TICKS(10));
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(300)) == 0) {
+      ESP_LOGE(TAG, "server_task did not stop within 300ms; leaking stack to avoid UAF");
     }
+    this->server_stop_waiter_.store(nullptr, std::memory_order_release);
   }
   audio_processor::cleanup_pinned_task(&this->server_task_handle_,
                                         &this->server_task_stack_, kServerTaskStackBytes);
@@ -220,7 +242,7 @@ void TcpTransport::server_task_() {
 
     if (this->server_socket_ < 0) {
       if (!this->setup_server_socket_()) {
-        delay(1000);
+        vTaskDelay(pdMS_TO_TICKS(1000));
         continue;
       }
     }
@@ -267,10 +289,14 @@ void TcpTransport::server_task_() {
       }
     }
 
-    delay(1);
+    vTaskDelay(1);
   }
 
   ESP_LOGD(TAG, "Server task exiting");
+  TaskHandle_t waiter = this->server_stop_waiter_.load(std::memory_order_acquire);
+  if (waiter != nullptr) {
+    xTaskNotifyGive(waiter);
+  }
   vTaskDelete(nullptr);
 }
 
@@ -334,8 +360,8 @@ void TcpTransport::close_client_socket_() {
 void TcpTransport::close_client_socket_and_notify_() {
   const bool was_connected = this->client_.socket.load(std::memory_order_acquire) >= 0;
   this->close_client_socket_();
-  if (was_connected && this->on_connection_change) {
-    this->on_connection_change(false);
+  if (was_connected) {
+    this->emit_connection_change_(false);
   }
 }
 
@@ -404,7 +430,7 @@ void TcpTransport::accept_client_() {
     return;
   }
 
-  if (this->should_accept_session && !this->should_accept_session()) {
+  if (!this->should_accept_session_()) {
     reject("upper layer rejected (FSM busy)");
     return;
   }
@@ -431,9 +457,7 @@ void TcpTransport::accept_client_() {
     return;
   }
 
-  if (this->on_connection_change) {
-    this->on_connection_change(true);
-  }
+  this->emit_connection_change_(true);
 
   // Forward the MSG_START we already consumed; on_connection_change(true)
   // above ran first so the FSM sees "connected" before processing START.
@@ -498,7 +522,6 @@ bool TcpTransport::originate(const std::string &host, uint16_t port) {
         break;
       }
       if (ready < 0 && errno != EINTR) break;
-      delay(1);
     }
     if (!connected && errno == EINPROGRESS) errno = ETIMEDOUT;
   }
@@ -538,9 +561,7 @@ bool TcpTransport::originate(const std::string &host, uint16_t port) {
     xTaskNotifyGive(this->server_task_handle_);
   }
 
-  if (this->on_connection_change) {
-    this->on_connection_change(true);
-  }
+  this->emit_connection_change_(true);
   return true;
 }
 
@@ -667,7 +688,7 @@ bool TcpTransport::receive_message_(int socket, MessageHeader &header,
     }
     if (received == 0) return false;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      delay(1);
+      wait_socket_readable(socket, 1);
       continue;
     }
     return false;
@@ -700,7 +721,7 @@ bool TcpTransport::receive_message_(int socket, MessageHeader &header,
       }
       if (received == 0) return false;
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        delay(1);
+        wait_socket_readable(socket, 1);
         continue;
       }
       return false;
@@ -725,9 +746,7 @@ void TcpTransport::dispatch_message_(const MessageHeader &header, const uint8_t 
         this->client_.streaming.store(true, std::memory_order_release);
       }
       this->client_.last_inbound_ms = millis();
-      if (this->on_audio_frame) {
-        this->on_audio_frame(data, header.length);
-      }
+      this->emit_audio_frame_(data, header.length);
       break;
 
     case MessageType::PING:
@@ -742,9 +761,7 @@ void TcpTransport::dispatch_message_(const MessageHeader &header, const uint8_t 
 
     default:
       // START / STOP / RING / ANSWER / ERROR / etc: forward upstream.
-      if (this->on_control) {
-        this->on_control(type, data, header.length);
-      }
+      this->emit_control_(type, data, header.length);
       break;
   }
 }

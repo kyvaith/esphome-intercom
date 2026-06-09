@@ -298,6 +298,7 @@ class EspAfe : public Component, public AudioProcessor {
 #ifdef USE_ESP_AFE_DIRECT_PATH
   SemaphoreHandle_t direct_feed_signal_{nullptr};
   StaticSemaphore_t direct_feed_signal_storage_{};
+  std::atomic<TaskHandle_t> direct_fetch_stop_waiter_{nullptr};
   static constexpr int kDirectFeedSignalMaxCount = 8;
   TaskHandle_t direct_fetch_task_handle_{nullptr};
   StaticTask_t direct_fetch_task_tcb_{};
