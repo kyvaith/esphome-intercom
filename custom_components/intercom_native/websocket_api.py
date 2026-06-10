@@ -958,7 +958,6 @@ class BridgeSession:
         self._start_sender_tasks()
 
         _LOGGER.info("Bridge started: %s <-> %s", self.source_host, self.dest_host)
-        self._fire_state_event("connected")
 
         return "connected"
 
