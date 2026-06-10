@@ -14,9 +14,10 @@ It can run in two supported shapes:
   routing, TDM reference, dual-bus sync, media player, Voice Assistant or Micro
   Wake Word share the same audio backend.
 
-The component always speaks 16 kHz, 16-bit, mono PCM on the wire. Any format
-conversion must happen before audio reaches `intercom_api`, either through
-ESPHome `microphone_source` or through `esp_audio_stack`.
+The component negotiates PCM per direction. The legacy/default wire format is
+`16000:s16le:1:32`, but native ESPHome microphone/speaker paths may advertise
+their actual format up to 48 kHz and 32-bit containers. AFE/AEC-backed branches
+remain 16 kHz/s16/mono because Espressif esp-sr exposes that surface.
 
 ## Audio Capabilities
 
@@ -36,8 +37,16 @@ Name|tcp|192.168.1.40|6054|full_duplex
 Name|udp|192.168.1.41|6054|6055|speaker_only
 ```
 
-Home Assistant consumes this field for routing/card display and for avoiding
-audio directions that cannot exist.
+It may also append per-direction audio capabilities:
+
+```text
+Name|tcp|192.168.1.40|6054|full_duplex|16000:s16le:1:32|48000:s32le:1:20
+Name|udp|192.168.1.41|6054|6055|speaker_only|16000:s16le:1:32|16000:s16le:1:32
+```
+
+Home Assistant consumes these fields for routing/card display, format
+negotiation and avoiding audio directions that cannot exist. UDP formats must
+fit one complete PCM frame in one safe datagram; larger formats should use TCP.
 
 ## Compile-Time Shape
 

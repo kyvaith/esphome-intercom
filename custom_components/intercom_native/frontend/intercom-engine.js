@@ -1,5 +1,4 @@
 const HA_SOFTPHONE_DEVICE_ID = "__intercom_native_ha_softphone__";
-const FRAME_BYTES = 1024;
 const WS_AUDIO = 1;
 const CALL_EVENT = "intercom_native.call_event";
 const ASSET_V = "3";
@@ -12,6 +11,7 @@ const ENGINE_TRANSITIONS = {
   STREAMING: ["ERROR"],
   ERROR: ["CALLING", "RINGING", "STREAMING"],
 };
+const LEGACY_FORMAT = Object.freeze({ sampleRate: 16000, pcmFormat: "s16le", channels: 1, frameMs: 32 });
 
 class IntercomEngine extends EventTarget {
   constructor() {
@@ -21,6 +21,8 @@ class IntercomEngine extends EventTarget {
     this._state = "IDLE";
     this._deviceId = "";
     this._audioMode = "full_duplex";
+    this._txFormat = LEGACY_FORMAT;
+    this._rxFormat = LEGACY_FORMAT;
     this._mediaStream = null;
     this._audioContext = null;
     this._captureNode = null;
@@ -189,8 +191,8 @@ class IntercomEngine extends EventTarget {
   _sendAudio(buffer) {
     if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
     const bytes = new Uint8Array(buffer);
-    if (bytes.byteLength !== FRAME_BYTES) return;
-    const frame = new Uint8Array(FRAME_BYTES + 1);
+    if (!bytes.byteLength) return;
+    const frame = new Uint8Array(bytes.byteLength + 1);
     frame[0] = WS_AUDIO;
     frame.set(bytes, 1);
     this._ws.send(frame);
@@ -209,7 +211,7 @@ class IntercomEngine extends EventTarget {
       return;
     }
     const raw = new Uint8Array(event.data);
-    if (raw[0] !== WS_AUDIO || raw.byteLength !== FRAME_BYTES + 1 || !this._playbackNode) return;
+    if (raw[0] !== WS_AUDIO || raw.byteLength < 2 || !this._playbackNode) return;
     const payload = raw.slice(1).buffer;
     this._playbackNode.port.postMessage({ type: "audio", buffer: payload }, [payload]);
     this._stats.received++;
@@ -218,15 +220,38 @@ class IntercomEngine extends EventTarget {
 
   _createAudioContext() {
     const Ctor = window.AudioContext || window.webkitAudioContext;
-    try {
-      return new Ctor({ sampleRate: 16000 });
-    } catch (_) {
-      return new Ctor();
-    }
+    return new Ctor();
   }
 
-  async _setupAudio(deviceInfo) {
+  _parseFormat(token, fallback = LEGACY_FORMAT) {
+    const parts = String(token || "").split(":");
+    if (parts.length !== 4) return fallback;
+    const sampleRate = Number(parts[0]);
+    const pcmFormat = parts[1];
+    const channels = Number(parts[2]);
+    const frameMs = Number(parts[3]);
+    if (!Number.isFinite(sampleRate) || !Number.isFinite(channels) || !Number.isFinite(frameMs)) return fallback;
+    if (!["s16le", "s24le", "s24le_in_s32", "s32le"].includes(pcmFormat)) return fallback;
+    return { sampleRate, pcmFormat, channels, frameMs };
+  }
+
+  _chooseDeviceFormat(deviceInfo, key, fallback = LEGACY_FORMAT) {
+    const formats = Array.isArray(deviceInfo?.[key]) ? deviceInfo[key] : [];
+    return this._parseFormat(formats[0], fallback);
+  }
+
+  _resolveSessionFormats(deviceInfo, negotiated = null) {
+    return {
+      tx: this._parseFormat(negotiated?.tx_format, this._chooseDeviceFormat(deviceInfo, "rx_formats")),
+      rx: this._parseFormat(negotiated?.rx_format, this._chooseDeviceFormat(deviceInfo, "tx_formats")),
+    };
+  }
+
+  async _setupAudio(deviceInfo, negotiated = null) {
     this._audioMode = this._normaliseAudioMode(deviceInfo?.audio_mode);
+    const formats = this._resolveSessionFormats(deviceInfo, negotiated);
+    this._txFormat = formats.tx;
+    this._rxFormat = formats.rx;
     const sendToEsp = this._audioMode === "full_duplex" || this._audioMode === "speaker_only";
     const receiveFromEsp = this._audioMode === "full_duplex" || this._audioMode === "mic_only";
     if (!sendToEsp && !receiveFromEsp) return;
@@ -240,7 +265,9 @@ class IntercomEngine extends EventTarget {
       });
       await this._audioContext.audioWorklet.addModule(`/intercom-native/intercom-processor.js?v=${ASSET_V}`);
       this._source = this._audioContext.createMediaStreamSource(this._mediaStream);
-      this._captureNode = new AudioWorkletNode(this._audioContext, "intercom-processor");
+      this._captureNode = new AudioWorkletNode(this._audioContext, "intercom-processor", {
+        processorOptions: { format: this._txFormat },
+      });
       this._captureNode.port.onmessage = (event) => {
         if (event.data?.type === "audio") this._sendAudio(event.data.buffer);
       };
@@ -249,7 +276,10 @@ class IntercomEngine extends EventTarget {
 
     if (receiveFromEsp) {
       await this._audioContext.audioWorklet.addModule(`/intercom-native/intercom-playback-processor.js?v=${ASSET_V}`);
-      this._playbackNode = new AudioWorkletNode(this._audioContext, "intercom-playback-processor");
+      this._playbackNode = new AudioWorkletNode(this._audioContext, "intercom-playback-processor", {
+        outputChannelCount: [this._rxFormat.channels],
+        processorOptions: { format: this._rxFormat },
+      });
       this._playbackNode.port.onmessage = (event) => {
         if (event.data?.type !== "stats") return;
         this._stats = { ...this._stats, ...event.data };
@@ -266,36 +296,54 @@ class IntercomEngine extends EventTarget {
 
   async startP2P(deviceInfo) {
     await this._connect(deviceInfo.device_id);
-    await this._setupAudio(deviceInfo);
     this._resetStats();
     this._setState("CALLING");
-    this._sendControl({ type: "start", device_id: deviceInfo.device_id, host: deviceInfo.host });
+    const reply = await this._sendControl({ type: "start", device_id: deviceInfo.device_id, host: deviceInfo.host }, true);
+    if (!["streaming", "ringing"].includes(reply?.state)) {
+      this._setState("ERROR");
+      return;
+    }
+    await this._setupAudio(deviceInfo, reply);
+    this._setState(reply.state);
   }
 
   async startHaSoftphone(target, softphoneInfo) {
     const info = { ...(softphoneInfo || {}), device_id: HA_SOFTPHONE_DEVICE_ID, audio_mode: target.audio_mode || "full_duplex" };
     await this._connect(HA_SOFTPHONE_DEVICE_ID);
-    await this._setupAudio(info);
     this._resetStats();
     this._setState("CALLING");
-    this._sendControl({ type: "ha_softphone_start", target_device_id: target.device_id });
+    const reply = await this._sendControl({ type: "ha_softphone_start", target_device_id: target.device_id }, true);
+    if (!["streaming", "ringing"].includes(reply?.state)) {
+      this._setState("ERROR");
+      return;
+    }
+    await this._setupAudio({ ...info, tx_formats: target.tx_formats, rx_formats: target.rx_formats }, reply);
+    this._setState(reply.state);
   }
 
   async answer(deviceInfo, sessionDeviceId) {
     const deviceId = sessionDeviceId || deviceInfo.device_id;
     await this._connect(deviceId);
-    await this._setupAudio({ ...(deviceInfo || {}), device_id: deviceId });
     this._resetStats();
+    const reply = await this._sendControl({ type: "answer", device_id: deviceId, host: deviceInfo?.host || "" }, true);
+    if (reply?.state !== "streaming") {
+      this._setState("ERROR");
+      return;
+    }
+    await this._setupAudio({ ...(deviceInfo || {}), device_id: deviceId }, reply);
     this._setState("STREAMING");
-    this._sendControl({ type: "answer", device_id: deviceId, host: deviceInfo?.host || "" });
   }
 
   async answerEspCall(deviceInfo) {
     await this._connect(deviceInfo.device_id);
-    await this._setupAudio(deviceInfo);
     this._resetStats();
+    const reply = await this._sendControl({ type: "answer_esp_call", device_id: deviceInfo.device_id, host: deviceInfo.host }, true);
+    if (reply?.state !== "streaming") {
+      this._setState("ERROR");
+      return;
+    }
+    await this._setupAudio(deviceInfo, reply);
     this._setState("STREAMING");
-    this._sendControl({ type: "answer_esp_call", device_id: deviceInfo.device_id, host: deviceInfo.host });
   }
 
   async stop(deviceId = this._deviceId) {

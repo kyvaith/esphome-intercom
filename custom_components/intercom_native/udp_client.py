@@ -146,6 +146,8 @@ class IntercomUdpClient(IntercomTransport):
             caller_name=eff_caller,
             dest_route="",
             dest_name="",
+            caller_tx_formats=self.local_tx_formats,
+            caller_rx_formats=self.local_rx_formats,
         )
         self.set_call_context(call_id, eff_caller)
         if not await self.send_control(MSG_START, data=body, retry=True):
@@ -188,10 +190,12 @@ class IntercomUdpClient(IntercomTransport):
         if not self._connected:
             return False
         self._awaiting_answer_ack = True
-        # PBX-lite ANSWER body = call_id prefix only. We don't track call_id
-        # on the HA side (yet), so synthesize from last_caller_name when known.
         cid = self._current_call_id() or ""
-        body = protocol.build_call_id_only_body(cid)
+        body = protocol.build_answer_body(
+            cid,
+            caller_to_dest_format=self.caller_to_dest_format,
+            dest_to_caller_format=self.dest_to_caller_format,
+        )
         ok = await self.send_control(MSG_ANSWER, data=body, retry=True)
         if ok:
             # Responder side: no inbound ANSWER will flip us via dispatch.

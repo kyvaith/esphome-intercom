@@ -36,6 +36,8 @@ void IntercomApi::clear_call_identity_() {
   this->current_caller_name_.clear();
   this->current_dest_route_id_.clear();
   this->current_dest_name_.clear();
+  this->current_caller_to_dest_format_ = LEGACY_AUDIO_FORMAT;
+  this->current_dest_to_caller_format_ = LEGACY_AUDIO_FORMAT;
 }
 
 IntercomApi::CallSnapshot IntercomApi::snapshot_call_identity_() const {
@@ -95,13 +97,35 @@ bool IntercomApi::send_pbx_decline_(const std::string &call_id, const std::strin
   return this->transport_->send_control(MessageType::DECLINE, buf, off);
 }
 
+bool IntercomApi::send_pbx_answer_(const std::string &call_id) {
+  if (!this->transport_) return false;
+  uint8_t buf[INTERCOM_MAX_CALL_ID_LEN + 32];
+  size_t off = encode_call_id_prefix(buf, sizeof(buf), call_id);
+  if (off == 0) return false;
+  if (!(this->current_caller_to_dest_format_ == LEGACY_AUDIO_FORMAT &&
+        this->current_dest_to_caller_format_ == LEGACY_AUDIO_FORMAT)) {
+    static const uint8_t ANSWER_V2_MAGIC[] = {'I', 'C', 'A', 'A', '2'};
+    if (sizeof(buf) - off < sizeof(ANSWER_V2_MAGIC) + 1 + 16) return false;
+    std::memcpy(buf + off, ANSWER_V2_MAGIC, sizeof(ANSWER_V2_MAGIC));
+    off += sizeof(ANSWER_V2_MAGIC);
+    buf[off++] = 1;
+    size_t n = encode_audio_format(buf + off, sizeof(buf) - off, this->current_caller_to_dest_format_);
+    if (n == 0) return false;
+    off += n;
+    n = encode_audio_format(buf + off, sizeof(buf) - off, this->current_dest_to_caller_format_);
+    if (n == 0) return false;
+    off += n;
+  }
+  return this->transport_->send_control(MessageType::ANSWER, buf, off);
+}
+
 bool IntercomApi::send_pbx_start_(const std::string &call_id,
                                    const std::string &caller_route,
                                    const std::string &caller_name,
                                    const std::string &dest_route,
                                    const std::string &dest_name) {
   if (!this->transport_) return false;
-  uint8_t buf[INTERCOM_MAX_CALL_ID_LEN + 4 * (INTERCOM_MAX_NAME_LEN + 1) + 4];
+  uint8_t buf[INTERCOM_MAX_CALL_ID_LEN + 4 * (INTERCOM_MAX_NAME_LEN + 1) + 48];
   size_t off = encode_call_id_prefix(buf, sizeof(buf), call_id);
   if (off == 0) return false;
   size_t n;
@@ -117,6 +141,22 @@ bool IntercomApi::send_pbx_start_(const std::string &call_id,
   n = encode_lp_string(buf + off, sizeof(buf) - off, dest_name, INTERCOM_MAX_NAME_LEN);
   if (n == 0) return false;
   off += n;
+  if (!(this->tx_audio_format_ == LEGACY_AUDIO_FORMAT &&
+        this->rx_audio_format_ == LEGACY_AUDIO_FORMAT)) {
+    static const uint8_t START_V2_MAGIC[] = {'I', 'C', 'A', 'F', '2'};
+    if (sizeof(buf) - off < sizeof(START_V2_MAGIC) + 1 + 2 + 16) return false;
+    std::memcpy(buf + off, START_V2_MAGIC, sizeof(START_V2_MAGIC));
+    off += sizeof(START_V2_MAGIC);
+    buf[off++] = 1;
+    buf[off++] = 1;
+    n = encode_audio_format(buf + off, sizeof(buf) - off, this->tx_audio_format_);
+    if (n == 0) return false;
+    off += n;
+    buf[off++] = 1;
+    n = encode_audio_format(buf + off, sizeof(buf) - off, this->rx_audio_format_);
+    if (n == 0) return false;
+    off += n;
+  }
   // Surface the transport result so the FSM can distinguish "leg dialed"
   // from "leg silently dropped" (TCP no socket, UDP no peer address yet).
   return this->transport_->send_control(MessageType::START, buf, off);
@@ -260,6 +300,8 @@ void IntercomApi::start() {
   }
 
   if (this->transport_ != nullptr) {
+    this->current_caller_to_dest_format_ = this->tx_audio_format_;
+    this->current_dest_to_caller_format_ = this->rx_audio_format_;
     if (!this->send_pbx_start_(call_id, caller_route, this->device_name_,
                                 dest_route, dest_name)) {
       ESP_LOGE(TAG, "MSG_START encode/send failed");
@@ -332,7 +374,7 @@ void IntercomApi::answer_call() {
   ESP_LOGI(TAG, "%s: answering call (call_id=%s)",
            this->device_name_.c_str(), call_id.c_str());
   if (this->transport_ && !call_id.empty()) {
-    this->send_pbx_simple_(MessageType::ANSWER, call_id);
+    this->send_pbx_answer_(call_id);
   } else if (this->transport_) {
     this->transport_->send_control(MessageType::ANSWER);
   }
@@ -579,6 +621,17 @@ void IntercomApi::end_call_(CallEndReason reason, const std::string &detail) {
 // === Transport callbacks ===
 
 void IntercomApi::on_audio_received_(const uint8_t *pcm, size_t bytes) {
+  const size_t expected = this->rx_audio_format_.nominal_frame_bytes();
+  if (bytes != expected) {
+    ESP_LOGW(TAG,
+             "Dropping intercom audio frame with wrong size: got %u bytes, expected %u for rx format %u:%u:%u:%u",
+             (unsigned) bytes, (unsigned) expected,
+             (unsigned) this->rx_audio_format_.sample_rate,
+             (unsigned) this->rx_audio_format_.pcm_format,
+             (unsigned) this->rx_audio_format_.channels,
+             (unsigned) this->rx_audio_format_.frame_ms);
+    return;
+  }
   // First inbound audio is the strongest "call established" signal; gates
   // the ANSWER-echo loop in on_control_received_(ANSWER).
   this->first_audio_received_.store(true, std::memory_order_release);
@@ -587,6 +640,7 @@ void IntercomApi::on_audio_received_(const uint8_t *pcm, size_t bytes) {
   }
   if (this->audio_debug_) {
     this->debug_log_pcm_level_("rx_network", pcm, bytes,
+                               this->rx_audio_format_,
                                this->audio_debug_last_rx_log_ms_, this->audio_debug_rx_frames_);
   }
 #ifdef USE_INTERCOM_API_SPEAKER
@@ -621,6 +675,8 @@ bool IntercomApi::decode_control_fields_(MessageType type, const uint8_t *data, 
   }
 
   if (type == MessageType::START) {
+    audio_format_list_legacy(&out->caller_tx_formats);
+    audio_format_list_legacy(&out->caller_rx_formats);
     auto decode_start_field = [&](const char *field, std::string *value) -> bool {
       if (len <= off) {
         ESP_LOGW(TAG, "START %s decode failed", field);
@@ -634,10 +690,55 @@ bool IntercomApi::decode_control_fields_(MessageType type, const uint8_t *data, 
       off += n;
       return true;
     };
-    return decode_start_field("caller_route", &out->caller_route) &&
-           decode_start_field("caller_name", &out->caller_name) &&
-           decode_start_field("dest_route", &out->dest_route) &&
-           decode_start_field("dest_name", &out->dest_name);
+    if (!(decode_start_field("caller_route", &out->caller_route) &&
+          decode_start_field("caller_name", &out->caller_name) &&
+          decode_start_field("dest_route", &out->dest_route) &&
+          decode_start_field("dest_name", &out->dest_name))) {
+      return false;
+    }
+    if (off == len) return true;
+    static const uint8_t START_V2_MAGIC[] = {'I', 'C', 'A', 'F', '2'};
+    if (len < off + sizeof(START_V2_MAGIC) + 1 ||
+        std::memcmp(data + off, START_V2_MAGIC, sizeof(START_V2_MAGIC)) != 0) {
+      ESP_LOGW(TAG, "START has unknown audio-format extension (%zu trailing bytes)", len - off);
+      return false;
+    }
+    off += sizeof(START_V2_MAGIC);
+    const uint8_t version = data[off++];
+    if (version != 1) {
+      ESP_LOGW(TAG, "START audio-format extension version %u is unsupported", version);
+      return false;
+    }
+    auto decode_format_list = [&](const char *field, AudioFormatList *list) -> bool {
+      if (len < off + 1) {
+        ESP_LOGW(TAG, "START %s format list missing count", field);
+        return false;
+      }
+      const uint8_t count = data[off++];
+      if (count == 0 || count > INTERCOM_MAX_AUDIO_FORMATS) {
+        ESP_LOGW(TAG, "START %s format count %u is invalid", field, count);
+        return false;
+      }
+      list->count = count;
+      for (uint8_t i = 0; i < count; i++) {
+        const size_t n = decode_audio_format(data + off, len - off, &list->formats[i]);
+        if (n == 0) {
+          ESP_LOGW(TAG, "START %s format %u decode failed", field, i);
+          return false;
+        }
+        off += n;
+      }
+      return true;
+    };
+    if (!decode_format_list("caller_tx", &out->caller_tx_formats) ||
+        !decode_format_list("caller_rx", &out->caller_rx_formats)) {
+      return false;
+    }
+    if (off != len) {
+      ESP_LOGW(TAG, "START has %zu trailing bytes after audio-format extension", len - off);
+      return false;
+    }
+    return true;
   }
 
   if (type == MessageType::DECLINE) {
@@ -647,6 +748,41 @@ bool IntercomApi::decode_control_fields_(MessageType type, const uint8_t *data, 
     const size_t n = decode_lp_string(data + off, len - off, &out->reason);
     if (n == 0) {
       ESP_LOGW(TAG, "DECLINE reason decode failed (truncated)");
+      return false;
+    }
+    return true;
+  }
+
+  if (type == MessageType::ANSWER) {
+    out->caller_to_dest_format = LEGACY_AUDIO_FORMAT;
+    out->dest_to_caller_format = LEGACY_AUDIO_FORMAT;
+    if (off == len) return true;
+    static const uint8_t ANSWER_V2_MAGIC[] = {'I', 'C', 'A', 'A', '2'};
+    if (len < off + sizeof(ANSWER_V2_MAGIC) + 1 ||
+        std::memcmp(data + off, ANSWER_V2_MAGIC, sizeof(ANSWER_V2_MAGIC)) != 0) {
+      ESP_LOGW(TAG, "ANSWER has unknown audio-format extension (%zu trailing bytes)", len - off);
+      return false;
+    }
+    off += sizeof(ANSWER_V2_MAGIC);
+    const uint8_t version = data[off++];
+    if (version != 1) {
+      ESP_LOGW(TAG, "ANSWER audio-format extension version %u is unsupported", version);
+      return false;
+    }
+    size_t n = decode_audio_format(data + off, len - off, &out->caller_to_dest_format);
+    if (n == 0) {
+      ESP_LOGW(TAG, "ANSWER caller_to_dest format decode failed");
+      return false;
+    }
+    off += n;
+    n = decode_audio_format(data + off, len - off, &out->dest_to_caller_format);
+    if (n == 0) {
+      ESP_LOGW(TAG, "ANSWER dest_to_caller format decode failed");
+      return false;
+    }
+    off += n;
+    if (off != len) {
+      ESP_LOGW(TAG, "ANSWER has %zu trailing bytes after audio-format extension", len - off);
       return false;
     }
     return true;
@@ -711,7 +847,7 @@ void IntercomApi::on_control_received_(MessageType type,
       if (state == CallState::STREAMING) {
         if (incoming_cid == active_cid) {
           ESP_LOGD(TAG, "START retransmit while STREAMING - re-acking with ANSWER");
-          send_call_id_only(MessageType::ANSWER, active_cid);
+          this->send_pbx_answer_(active_cid);
         } else {
           ESP_LOGW(TAG, "%s: another caller while STREAMING - DECLINE busy",
                    this->device_name_.c_str());
@@ -792,6 +928,28 @@ handle_incoming_start_in_idle:
         break;
       }
 
+      auto list_contains = [](const AudioFormatList &list, const AudioFormat &fmt) -> bool {
+        for (uint8_t i = 0; i < list.count; i++) {
+          if (list.formats[i] == fmt) return true;
+        }
+        return false;
+      };
+      if (!list_contains(msg.caller_tx_formats, this->rx_audio_format_) ||
+          !list_contains(msg.caller_rx_formats, this->tx_audio_format_)) {
+        ESP_LOGW(TAG,
+                 "%s: inbound START from %s has no compatible audio format - DECLINE(incompatible_audio_format)",
+                 this->device_name_.c_str(),
+                 in_caller_name.empty() ? "(unknown caller)" : in_caller_name.c_str());
+        this->set_terminal_decline_(incoming_cid, "incompatible_audio_format");
+        this->send_pbx_decline_(incoming_cid, "incompatible_audio_format");
+        if (this->transport_ != nullptr) {
+          this->transport_->disconnect();
+        }
+        break;
+      }
+      this->current_caller_to_dest_format_ = this->rx_audio_format_;
+      this->current_dest_to_caller_format_ = this->tx_audio_format_;
+
       const std::string dest_route = in_dest_route.empty()
           ? (this->device_route_id_.empty() ? this->device_name_ : this->device_route_id_)
           : in_dest_route;
@@ -810,7 +968,7 @@ handle_incoming_start_in_idle:
       if (this->auto_answer_) {
         // ANSWER first so the peer learns the call is up, then bring our
         // audio path online.
-        send_call_id_only(MessageType::ANSWER, incoming_cid);
+        this->send_pbx_answer_(incoming_cid);
         this->set_active_(true);
         this->set_streaming_(true);
       } else {
@@ -857,6 +1015,19 @@ handle_incoming_start_in_idle:
       }
       const CallState state = this->call_state_.load(std::memory_order_acquire);
       if (state == CallState::OUTGOING) {
+        if (!(msg.caller_to_dest_format == this->tx_audio_format_) ||
+            !(msg.dest_to_caller_format == this->rx_audio_format_)) {
+          ESP_LOGE(TAG,
+                   "%s: ANSWER confirmed an incompatible audio format; ending call",
+                   this->device_name_.c_str());
+          this->end_call_(CallEndReason::PROTOCOL_ERROR, "incompatible_audio_format");
+          this->set_streaming_(false);
+          this->set_active_(false);
+          if (this->transport_) this->transport_->disconnect();
+          break;
+        }
+        this->current_caller_to_dest_format_ = msg.caller_to_dest_format;
+        this->current_dest_to_caller_format_ = msg.dest_to_caller_format;
         ESP_LOGI(TAG, "%s: destination answered, streaming (call_id=%s)",
                  this->device_name_.c_str(),
                  in_call_id.c_str());
@@ -865,11 +1036,11 @@ handle_incoming_start_in_idle:
         ESP_LOGI(TAG, "%s: answered remotely (by HA)", this->device_name_.c_str());
         this->set_active_(true);
         this->set_streaming_(true);
-        send_call_id_only(MessageType::ANSWER, this->get_current_call_id_());
+        this->send_pbx_answer_(this->get_current_call_id_());
       } else if (state == CallState::STREAMING &&
                  !this->first_audio_received_.load(std::memory_order_acquire)) {
         ESP_LOGD(TAG, "ANSWER repeat in STREAMING (no audio yet) - re-echoing ack");
-        send_call_id_only(MessageType::ANSWER, this->get_current_call_id_());
+        this->send_pbx_answer_(this->get_current_call_id_());
       } else {
         const bool audio_seen = this->first_audio_received_.load(std::memory_order_acquire);
         ESP_LOGD(TAG, "ANSWER ignored in state %s (audio_seen=%d)",

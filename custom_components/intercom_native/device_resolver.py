@@ -10,10 +10,15 @@ from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
+from .audio_format import parse_audio_format_list, require_udp_safe_formats
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 _CACHE_KEY = "device_resolver"
+
+
+def _format_tokens(formats: list) -> list[str]:
+    return [fmt.wire_token() for fmt in formats]
 
 
 def slugify_route_id(raw: str) -> str:
@@ -64,8 +69,8 @@ def _match_name(value: str | None, *candidates: str | None) -> bool:
 def parse_intercom_endpoint(value: str | None) -> dict | None:
     """Parse the project endpoint standard published by ESP intercom_api.
 
-    TCP: Name|tcp|IP|tcp_port[|audio_mode]
-    UDP: Name|udp|IP|audio_port|control_port[|audio_mode]
+    TCP: Name|tcp|IP|tcp_port[|audio_mode[|tx_formats|rx_formats]]
+    UDP: Name|udp|IP|audio_port|control_port[|audio_mode[|tx_formats|rx_formats]]
     """
     if not value:
         return None
@@ -80,10 +85,24 @@ def parse_intercom_endpoint(value: str | None) -> dict | None:
     if not name or not host or transport not in ("tcp", "udp"):
         return None
 
+    def parse_formats(first: int) -> tuple[str, list, list] | None:
+        mode = _valid_audio_mode(parts[first] if len(parts) > first else None)
+        try:
+            tx_formats = parse_audio_format_list(parts[first + 1] if len(parts) > first + 1 else None)
+            rx_formats = parse_audio_format_list(parts[first + 2] if len(parts) > first + 2 else None)
+        except ValueError as err:
+            _LOGGER.warning("Invalid intercom endpoint audio formats in %r: %s", text, err)
+            return None
+        return mode, tx_formats, rx_formats
+
     if transport == "tcp":
         tcp_port = _valid_port(parts[3])
-        if tcp_port is None or len(parts) not in (4, 5):
+        if tcp_port is None or len(parts) not in (4, 5, 6, 7):
             return None
+        parsed_tail = parse_formats(4)
+        if parsed_tail is None:
+            return None
+        mode, tx_formats, rx_formats = parsed_tail
         return {
             "name": name,
             "transport": "tcp",
@@ -91,14 +110,26 @@ def parse_intercom_endpoint(value: str | None) -> dict | None:
             "tcp_port": tcp_port,
             "udp_audio_port": None,
             "udp_control_port": None,
-            "audio_mode": _valid_audio_mode(parts[4] if len(parts) == 5 else None),
+            "audio_mode": mode,
+            "tx_formats": tx_formats,
+            "rx_formats": rx_formats,
         }
 
-    if len(parts) not in (5, 6):
+    if len(parts) not in (5, 6, 7, 8):
         return None
     audio_port = _valid_port(parts[3])
     control_port = _valid_port(parts[4])
     if audio_port is None or control_port is None:
+        return None
+    parsed_tail = parse_formats(5)
+    if parsed_tail is None:
+        return None
+    mode, tx_formats, rx_formats = parsed_tail
+    try:
+        require_udp_safe_formats(tx_formats, context=f"{name} UDP tx_formats")
+        require_udp_safe_formats(rx_formats, context=f"{name} UDP rx_formats")
+    except ValueError as err:
+        _LOGGER.warning("Invalid UDP intercom endpoint %r: %s", text, err)
         return None
     return {
         "name": name,
@@ -107,7 +138,9 @@ def parse_intercom_endpoint(value: str | None) -> dict | None:
         "tcp_port": None,
         "udp_audio_port": audio_port,
         "udp_control_port": control_port,
-        "audio_mode": _valid_audio_mode(parts[5] if len(parts) == 6 else None),
+        "audio_mode": mode,
+        "tx_formats": tx_formats,
+        "rx_formats": rx_formats,
     }
 
 
@@ -233,6 +266,8 @@ class IntercomDeviceResolver:
                 "udp_audio_port": endpoint["udp_audio_port"],
                 "udp_control_port": endpoint["udp_control_port"],
                 "audio_mode": endpoint["audio_mode"],
+                "tx_formats": _format_tokens(endpoint["tx_formats"]),
+                "rx_formats": _format_tokens(endpoint["rx_formats"]),
                 "esphome_id": esphome_id,
                 "entities": entities,
             })

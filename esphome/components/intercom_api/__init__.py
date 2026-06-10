@@ -73,6 +73,13 @@ CONF_TCP_PORT = "tcp_port"
 CONF_ROUTING_MODE = "routing_mode"
 CONF_USE_HA_AS_FIRST_CONTACT = "use_ha_as_first_contact"
 CONF_AUDIO_DEBUG = "audio_debug"
+CONF_AUDIO = "audio"
+CONF_TX = "tx"
+CONF_RX = "rx"
+CONF_SAMPLE_RATE = "sample_rate"
+CONF_PCM_FORMAT = "pcm_format"
+CONF_CHANNELS = "channels"
+CONF_FRAME_MS = "frame_ms"
 CONF_ANNOUNCE = "announce"
 CONF_DISCOVERY = "discovery"
 CONF_MDNS = "mdns"
@@ -97,6 +104,50 @@ MODE_RAW_UDP = "raw_udp"  # raw UDP audio, no PBX-lite signaling
 intercom_api_ns = cg.esphome_ns.namespace("intercom_api")
 IntercomApi = intercom_api_ns.class_("IntercomApi", cg.Component)
 TransportType = intercom_api_ns.enum("TransportType", is_class=True)
+PcmFormat = intercom_api_ns.enum("PcmFormat", is_class=True)
+
+PCM_FORMAT_IDS = {
+    "s16le": 1,
+    "s24le": 2,
+    "s24le_in_s32": 3,
+    "s32le": 4,
+}
+
+SUPPORTED_INTERCOM_SAMPLE_RATES = (8000, 12000, 16000, 24000, 32000, 44100, 48000)
+UDP_SAFE_PAYLOAD_BYTES = 1200
+
+
+def _validate_intercom_audio_format(value):
+    if (value[CONF_SAMPLE_RATE] * value[CONF_FRAME_MS]) % 1000 != 0:
+        raise cv.Invalid(
+            f"sample_rate {value[CONF_SAMPLE_RATE]} and frame_ms {value[CONF_FRAME_MS]} "
+            "do not form whole PCM frames"
+        )
+    return value
+
+
+INTERCOM_AUDIO_FORMAT_SCHEMA = cv.All(cv.Schema(
+    {
+        cv.Optional(CONF_SAMPLE_RATE, default=16000): cv.one_of(*SUPPORTED_INTERCOM_SAMPLE_RATES, int=True),
+        cv.Optional(CONF_PCM_FORMAT, default="s16le"): cv.one_of(*PCM_FORMAT_IDS.keys(), lower=True),
+        cv.Optional(CONF_CHANNELS, default=1): cv.one_of(1, 2, int=True),
+        cv.Optional(CONF_FRAME_MS, default=32): cv.one_of(10, 20, 32, int=True),
+    }
+), _validate_intercom_audio_format)
+
+
+def _format_container_bits(fmt: dict) -> int:
+    pcm = fmt[CONF_PCM_FORMAT]
+    if pcm == "s16le":
+        return 16
+    if pcm == "s24le":
+        return 24
+    return 32
+
+
+def _format_frame_bytes(fmt: dict) -> int:
+    samples = (fmt[CONF_SAMPLE_RATE] * fmt[CONF_FRAME_MS]) // 1000
+    return samples * fmt[CONF_CHANNELS] * (_format_container_bits(fmt) // 8)
 
 # === Action classes (for YAML: intercom_api.next_contact, etc.) ===
 NextContactAction = intercom_api_ns.class_("NextContactAction", automation.Action)
@@ -248,6 +299,15 @@ CONFIG_SCHEMA = cv.Schema(
         # Targeted diagnostics: logs PCM peak/RMS on intercom TX/RX.
         # Keep disabled by default; enable only on devices under audio-level test.
         cv.Optional(CONF_AUDIO_DEBUG, default=False): cv.boolean,
+        # Intercom wire PCM contract. `tx` is microphone/source -> wire;
+        # `rx` is wire -> speaker/sink. They are intentionally independent:
+        # an AFE mic can publish 16 kHz while the speaker sink accepts 48 kHz.
+        cv.Optional(CONF_AUDIO, default={}): cv.Schema(
+            {
+                cv.Optional(CONF_TX, default={}): INTERCOM_AUDIO_FORMAT_SCHEMA,
+                cv.Optional(CONF_RX, default={}): INTERCOM_AUDIO_FORMAT_SCHEMA,
+            }
+        ),
         # Publish this device's canonical endpoint as an mDNS TXT record:
         #   endpoint=Name|tcp|ip|tcp_port
         #   endpoint=Name|udp|ip|audio_port|control_port
@@ -271,7 +331,12 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_MICROPHONE): cv.use_id(microphone.Microphone),
         # Compatibility/advanced path for raw microphones that need channel,
         # bit-depth, or integer gain conversion before intercom_api sees them.
-        cv.Optional(CONF_MICROPHONE_SOURCE): microphone.microphone_source_schema(),
+        cv.Optional(CONF_MICROPHONE_SOURCE): microphone.microphone_source_schema(
+            min_bits_per_sample=16,
+            max_bits_per_sample=32,
+            min_channels=1,
+            max_channels=2,
+        ),
         cv.Optional(CONF_SPEAKER): cv.use_id(speaker.Speaker),
         # DC offset removal for mics with significant DC bias (e.g., SPH0645)
         cv.Optional(CONF_DC_OFFSET_REMOVAL, default=False): cv.boolean,
@@ -403,33 +468,47 @@ def _final_validate(config):
                 "intercom_api.control_port must differ from listen_port "
                 "(audio and control travel on separate UDP sockets)."
             )
+        audio_cfg = config[CONF_AUDIO]
+        for direction in (CONF_TX, CONF_RX):
+            fmt = audio_cfg[direction]
+            frame_bytes = _format_frame_bytes(fmt)
+            if frame_bytes > UDP_SAFE_PAYLOAD_BYTES:
+                raise cv.Invalid(
+                    f"intercom_api UDP audio.{direction} frame is {frame_bytes} bytes, "
+                    f"above the safe datagram payload limit of {UDP_SAFE_PAYLOAD_BYTES}. "
+                    "Use protocol: tcp or lower sample_rate/channels/pcm_format/frame_ms."
+                )
 
     if CONF_MICROPHONE in config and CONF_MICROPHONE_SOURCE in config:
         raise cv.Invalid(
             "Use only one of intercom_api.microphone or intercom_api.microphone_source."
         )
 
+    audio_cfg = config[CONF_AUDIO]
+    tx_fmt = audio_cfg[CONF_TX]
+    rx_fmt = audio_cfg[CONF_RX]
+
     if CONF_MICROPHONE in config:
         try:
             audio.final_validate_audio_schema(
                 "intercom_api",
                 audio_device=CONF_MICROPHONE,
-                bits_per_sample=16,
-                channels=1,
-                sample_rate=16000,
+                bits_per_sample=_format_container_bits(tx_fmt),
+                channels=tx_fmt[CONF_CHANNELS],
+                sample_rate=tx_fmt[CONF_SAMPLE_RATE],
                 audio_device_issue=True,
             )(config)
         except AssertionError:
             _LOGGER.warning(
                 "intercom_api could not validate the referenced microphone audio "
                 "format because that microphone component does not publish ESPHome "
-                "audio stream limits. Continuing for external/native microphone "
-                "components; the runtime expects 16 kHz, 16-bit, mono PCM."
+                "audio stream limits. Continuing with the explicitly declared "
+                "intercom_api.audio.tx format."
             )
 
     if CONF_MICROPHONE_SOURCE in config:
         microphone.final_validate_microphone_source_schema(
-            "intercom_api", sample_rate=16000
+            "intercom_api", sample_rate=tx_fmt[CONF_SAMPLE_RATE]
         )(config[CONF_MICROPHONE_SOURCE])
 
     if CONF_SPEAKER in config:
@@ -437,17 +516,16 @@ def _final_validate(config):
             audio.final_validate_audio_schema(
                 "intercom_api",
                 audio_device=CONF_SPEAKER,
-                bits_per_sample=16,
-                channels=1,
-                sample_rate=16000,
+                bits_per_sample=_format_container_bits(rx_fmt),
+                channels=rx_fmt[CONF_CHANNELS],
+                sample_rate=rx_fmt[CONF_SAMPLE_RATE],
                 audio_device_issue=True,
             )(config)
         except AssertionError:
             _LOGGER.warning(
                 "intercom_api speaker format was not declared by the referenced "
                 "speaker component, so ESPHome cannot check it at compile time. "
-                "Continuing anyway; intercom_api will send 16 kHz, 16-bit, mono "
-                "PCM to that speaker."
+                "Continuing with the explicitly declared intercom_api.audio.rx format."
             )
 
     # Check if esp_audio_stack is also configured
@@ -494,6 +572,20 @@ async def _add_core_settings(var, config, is_raw_udp: bool):
     cg.add(var.set_buffers_in_psram(config[CONF_BUFFERS_IN_PSRAM]))
     cg.add(var.set_use_ha_as_first_contact(config[CONF_USE_HA_AS_FIRST_CONTACT]))
     cg.add(var.set_audio_debug(config[CONF_AUDIO_DEBUG]))
+    audio_cfg = config[CONF_AUDIO]
+    for key, setter in (
+        (CONF_TX, var.set_tx_audio_format),
+        (CONF_RX, var.set_rx_audio_format),
+    ):
+        fmt = audio_cfg[key]
+        cg.add(
+            setter(
+                fmt[CONF_SAMPLE_RATE],
+                PCM_FORMAT_IDS[fmt[CONF_PCM_FORMAT]],
+                fmt[CONF_CHANNELS],
+                fmt[CONF_FRAME_MS],
+            )
+        )
     if config[CONF_PROTOCOL] == PROTOCOL_UDP:
         cg.add_define("USE_INTERCOM_UDP_TRANSPORT")
     else:

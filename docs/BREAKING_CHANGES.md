@@ -5,7 +5,8 @@
 The Lovelace card no longer sends or receives audio through Home Assistant's
 shared frontend WebSocket as JSON/base64 messages. Browser audio now uses the
 authenticated `/api/intercom_native/ws` WebSocket endpoint with binary PCM
-frames that match the ESP wire chunk size.
+frames that match the negotiated intercom audio format. Legacy peers still use
+`16000:s16le:1:32`; newer peers may negotiate per-direction PCM formats.
 
 Removed legacy card audio commands:
 

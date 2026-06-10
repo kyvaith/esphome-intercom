@@ -33,6 +33,9 @@ PhonebookEntry
   protocol: tcp|udp|ha
   audio_port: uint16        # TCP signaling port OR UDP audio port
   control_port: uint16?     # UDP framed-control port, absent for TCP
+  audio_mode: full_duplex|mic_only|speaker_only|control_only?
+  tx_formats: string?       # semicolon-separated AudioFormat tokens
+  rx_formats: string?       # semicolon-separated AudioFormat tokens
   route_id: string?         # optional technical route hint
   role: esp|ha?             # optional metadata
 ```
@@ -58,6 +61,30 @@ Name|tcp|ip|tcp_port
 Name|udp|ip|udp_audio_port|udp_control_port
 Name|ha|ip|tcp_port|udp_audio_port|udp_control_port
 ```
+
+Current endpoints may append audio capability fields:
+
+```text
+Name|tcp|ip|tcp_port|audio_mode|tx_formats|rx_formats
+Name|udp|ip|udp_audio_port|udp_control_port|audio_mode|tx_formats|rx_formats
+```
+
+`tx_formats` and `rx_formats` are semicolon-separated tokens:
+
+```text
+sample_rate:pcm_format:channels:frame_ms
+```
+
+Example:
+
+```text
+Panel|tcp|192.168.1.40|6054|full_duplex|16000:s16le:1:32|48000:s32le:1:20
+```
+
+Missing capability fields mean the legacy format `16000:s16le:1:32`. For UDP
+rows every advertised frame must fit in one safe datagram; HA rejects UDP
+formats above the safe payload threshold instead of relying on IP
+fragmentation.
 
 `ha` is a bridge/role marker. Its row carries both HA transport endpoints so TCP
 firmware can shape it to `Name|tcp|ip|tcp_port` and UDP firmware can shape it to

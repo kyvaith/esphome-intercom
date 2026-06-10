@@ -1,92 +1,87 @@
-/**
- * Intercom AudioWorklet Processor
- * Based on Home Assistant's recorder-worklet.js
- * This processor runs in a separate audio thread and converts
- * Float32 audio samples to Int16 PCM format at 16kHz.
- */
+const DEFAULT_FORMAT = Object.freeze({ sampleRate: 16000, pcmFormat: "s16le", channels: 1, frameMs: 32 });
 
-const TARGET_SAMPLE_RATE = 16000;
+function normaliseFormat(value) {
+  const fmt = value || DEFAULT_FORMAT;
+  const sampleRate = Number(fmt.sampleRate) || DEFAULT_FORMAT.sampleRate;
+  const frameMs = Number(fmt.frameMs) || DEFAULT_FORMAT.frameMs;
+  const channels = Number(fmt.channels) || DEFAULT_FORMAT.channels;
+  const pcmFormat = ["s16le", "s24le", "s24le_in_s32", "s32le"].includes(fmt.pcmFormat)
+    ? fmt.pcmFormat
+    : DEFAULT_FORMAT.pcmFormat;
+  const bytesPerSample = pcmFormat === "s16le" ? 2 : pcmFormat === "s24le" ? 3 : 4;
+  return {
+    sampleRate,
+    frameMs,
+    channels,
+    pcmFormat,
+    bytesPerSample,
+    frameSamples: Math.floor((sampleRate * frameMs) / 1000),
+  };
+}
 
 class RecorderProcessor extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
-    this._targetSamples = 512; // 32ms chunks @ 16kHz, matches ESP AUDIO_CHUNK_SIZE
-    this._buffers = [
-      new Int16Array(this._targetSamples),
-      new Int16Array(this._targetSamples)
-    ];
-    this._activeBuffer = 0;
-    this._writeIndex = 0;
-    this._frameCount = 0;
-    this._chunksSent = 0;
-    this._totalSamplesProcessed = 0;
-
-    // Resampling state - works for any input rate (44.1kHz, 48kHz, etc)
-    this._resampleRatio = sampleRate / TARGET_SAMPLE_RATE;
+    this._format = normaliseFormat(options?.processorOptions?.format);
+    this._frameBytes = this._format.frameSamples * this._format.channels * this._format.bytesPerSample;
+    this._buffer = new ArrayBuffer(this._frameBytes);
+    this._view = new DataView(this._buffer);
+    this._writeSample = 0;
     this._position = 0;
     this._lastSample = 0;
-
-    // Send init message to main thread
-    this.port.postMessage({
-      type: "debug",
-      message: `Worklet v2.4.0: ${sampleRate}Hz -> ${TARGET_SAMPLE_RATE}Hz`
-    });
   }
 
-  _writeSample(sample) {
+  _encode(sample, sampleIndex) {
     const s = Math.max(-1, Math.min(1, sample));
-    this._buffers[this._activeBuffer][this._writeIndex++] =
-      s < 0 ? s * 0x8000 : s * 0x7fff;
-
-    if (this._writeIndex !== this._targetSamples) return;
-
-    const frame = this._buffers[this._activeBuffer];
-    this._chunksSent++;
-    try {
-      this.port.postMessage({ type: "audio", buffer: frame.buffer }, [frame.buffer]);
-    } catch (err) {
-      console.error("[IntercomProcessor] postMessage error:", err);
+    const offset = sampleIndex * this._format.bytesPerSample;
+    if (this._format.pcmFormat === "s16le") {
+      this._view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    } else if (this._format.pcmFormat === "s24le") {
+      const v = Math.trunc(s < 0 ? s * 0x800000 : s * 0x7fffff);
+      this._view.setUint8(offset, v & 0xff);
+      this._view.setUint8(offset + 1, (v >> 8) & 0xff);
+      this._view.setUint8(offset + 2, (v >> 16) & 0xff);
+    } else if (this._format.pcmFormat === "s24le_in_s32") {
+      this._view.setInt32(offset, Math.trunc(s < 0 ? s * 0x80000000 : s * 0x7fffff00), true);
+    } else {
+      this._view.setInt32(offset, Math.trunc(s < 0 ? s * 0x80000000 : s * 0x7fffffff), true);
     }
-    this._buffers[this._activeBuffer] = new Int16Array(this._targetSamples);
-    this._activeBuffer ^= 1;
-    this._writeIndex = 0;
   }
 
-  process(inputList, _outputList, _parameters) {
-    this._frameCount++;
-
-    // Check input validity
-    if (!inputList || inputList.length === 0) {
-      return true;
+  _writeMono(sample) {
+    for (let ch = 0; ch < this._format.channels; ch++) {
+      this._encode(sample, this._writeSample * this._format.channels + ch);
     }
+    this._writeSample++;
+    if (this._writeSample !== this._format.frameSamples) return;
 
-    if (!inputList[0] || inputList[0].length === 0) {
-      return true;
-    }
+    const frame = this._buffer;
+    this.port.postMessage({ type: "audio", buffer: frame }, [frame]);
+    this._buffer = new ArrayBuffer(this._frameBytes);
+    this._view = new DataView(this._buffer);
+    this._writeSample = 0;
+  }
 
-    const float32Data = inputList[0][0]; // First channel of first input
-    if (!float32Data || float32Data.length === 0) {
-      return true;
-    }
+  process(inputList) {
+    const input = inputList?.[0]?.[0];
+    if (!input?.length) return true;
 
-    if (sampleRate === TARGET_SAMPLE_RATE) {
-      for (let i = 0; i < float32Data.length; i++) this._writeSample(float32Data[i]);
+    const ratio = sampleRate / this._format.sampleRate;
+    if (ratio === 1) {
+      for (let i = 0; i < input.length; i++) this._writeMono(input[i]);
     } else {
-      const ratio = this._resampleRatio;
-      while (this._position < float32Data.length) {
+      while (this._position < input.length) {
         const idx = Math.floor(this._position);
         const frac = this._position - idx;
-        const a = idx > 0 ? float32Data[idx - 1] : this._lastSample;
-        const b = float32Data[idx] ?? a;
-        this._writeSample(a + (b - a) * frac);
+        const a = idx > 0 ? input[idx - 1] : this._lastSample;
+        const b = input[idx] ?? a;
+        this._writeMono(a + (b - a) * frac);
         this._position += ratio;
       }
-      this._position -= float32Data.length;
-      this._lastSample = float32Data[float32Data.length - 1] || this._lastSample;
+      this._position -= input.length;
+      this._lastSample = input[input.length - 1] || this._lastSample;
     }
-    this._totalSamplesProcessed += float32Data.length;
-
-    return true; // Keep processor alive
+    return true;
   }
 }
 

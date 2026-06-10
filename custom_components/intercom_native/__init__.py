@@ -32,6 +32,14 @@ from .const import (
     INTERCOM_UDP_CONTROL_PORT,
 )
 from .device_resolver import get_resolver
+from .audio_format import (
+    AudioFormat,
+    HA_BROWSER_RX_FORMATS,
+    HA_BROWSER_TX_FORMATS,
+    LEGACY_AUDIO_FORMAT,
+    parse_audio_format_list,
+    require_udp_safe_formats,
+)
 from .peer import Peer
 from .websocket_api import (
     async_register_websocket_api,
@@ -67,10 +75,38 @@ class InboundStart:
     call_id: str
     port: int = 0
     transport: object | None = None  # set by TCP listener (adopted leg)
+    caller_tx_formats: list[AudioFormat] | None = None
+    caller_rx_formats: list[AudioFormat] | None = None
 
 _LOGGER = logging.getLogger(__name__)
 _INTERCOM_UDP_SERVICE_TYPE = "_intercom-udp._udp.local."
 _INTERCOM_TCP_SERVICE_TYPE = "_intercom-tcp._tcp.local."
+
+
+def _device_formats(device: dict | None, key: str):
+    if not device:
+        return [LEGACY_AUDIO_FORMAT]
+    value = device.get(key)
+    if isinstance(value, str):
+        raw = value
+    else:
+        raw = ";".join(value or [])
+    try:
+        formats = parse_audio_format_list(raw)
+        if device.get("transport") == "udp":
+            require_udp_safe_formats(
+                formats,
+                context=f"{device.get('name') or device.get('device_id')} UDP {key}",
+            )
+        return formats
+    except ValueError as err:
+        _LOGGER.warning(
+            "Ignoring invalid %s on %s: %s",
+            key,
+            (device or {}).get("name") or (device or {}).get("device_id"),
+            err,
+        )
+        return [LEGACY_AUDIO_FORMAT]
 
 
 def _ha_peer_name(hass: HomeAssistant) -> str:
@@ -596,6 +632,10 @@ async def _handle_answer_service(call: ServiceCall, device: dict) -> None:
         host=host,
         transport_type=_select_transport_type(hass, host),
         audio_mode=device.get("audio_mode", "full_duplex"),
+        local_tx_formats=list(HA_BROWSER_TX_FORMATS),
+        local_rx_formats=list(HA_BROWSER_RX_FORMATS),
+        peer_tx_formats=_device_formats(device, "tx_formats"),
+        peer_rx_formats=_device_formats(device, "rx_formats"),
     )
     result = await session.answer_esp_call()
     if result == "streaming":
@@ -749,6 +789,10 @@ async def _handle_call_service(call: ServiceCall, dest_device: dict) -> None:
         host=dest_host,
         transport_type=_select_transport_type(hass, dest_host),
         audio_mode=dest_device.get("audio_mode", "full_duplex"),
+        local_tx_formats=list(HA_BROWSER_TX_FORMATS),
+        local_rx_formats=list(HA_BROWSER_RX_FORMATS),
+        peer_tx_formats=_device_formats(dest_device, "tx_formats"),
+        peer_rx_formats=_device_formats(dest_device, "rx_formats"),
     )
     result = await session.start()
 
@@ -796,6 +840,8 @@ async def _handle_forward_service(call: ServiceCall, source_device: dict) -> Non
             dest_device["name"],
             _select_transport_type(hass, dest_device["host"]),
             dest_device.get("audio_mode", "full_duplex"),
+            _device_formats(dest_device, "tx_formats"),
+            _device_formats(dest_device, "rx_formats"),
         )
         _LOGGER.info(
             "Forward via service: %s -> %s (%s)",
@@ -821,6 +867,10 @@ async def _handle_forward_service(call: ServiceCall, source_device: dict) -> Non
         dest_transport_type=_select_transport_type(hass, dest_device["host"]),
         source_audio_mode=source_device.get("audio_mode", "full_duplex"),
         dest_audio_mode=dest_device.get("audio_mode", "full_duplex"),
+        source_tx_formats=_device_formats(source_device, "tx_formats"),
+        source_rx_formats=_device_formats(source_device, "rx_formats"),
+        dest_tx_formats=_device_formats(dest_device, "tx_formats"),
+        dest_rx_formats=_device_formats(dest_device, "rx_formats"),
     )
     _bridges[bridge_id] = new_bridge
     result = await new_bridge.start()
@@ -1048,19 +1098,37 @@ async def _async_start_udp_socket_manager(hass: HomeAssistant) -> bool:
         call_id: str,
         host: str,
         port: int,
+        caller_tx_formats: list[AudioFormat],
+        caller_rx_formats: list[AudioFormat],
     ) -> None:
+        inbound = InboundStart(
+            host=host,
+            caller_name=caller_name,
+            caller_route=caller_route,
+            dest_name=dest_name,
+            dest_route=dest_route,
+            call_id=call_id,
+            port=port,
+            transport=None,
+            caller_tx_formats=caller_tx_formats,
+            caller_rx_formats=caller_rx_formats,
+        )
+        try:
+            require_udp_safe_formats(
+                caller_tx_formats or [LEGACY_AUDIO_FORMAT],
+                context=f"UDP caller {caller_name or host} tx_formats",
+            )
+            require_udp_safe_formats(
+                caller_rx_formats or [LEGACY_AUDIO_FORMAT],
+                context=f"UDP caller {caller_name or host} rx_formats",
+            )
+        except ValueError as err:
+            _LOGGER.warning("Rejecting UDP START from %s: %s", host, err)
+            await _decline_inbound_start(hass, inbound, "unsupported_udp_audio_format")
+            return
         await _route_inbound_call_pbx_lite(
             hass,
-            InboundStart(
-                host=host,
-                caller_name=caller_name,
-                caller_route=caller_route,
-                dest_name=dest_name,
-                dest_route=dest_route,
-                call_id=call_id,
-                port=port,
-                transport=None,
-            ),
+            inbound,
         )
 
     manager.set_unsolicited_callback(_on_unsolicited)
@@ -1254,6 +1322,10 @@ async def _bridge_inbound_call_pbx_lite(
         source_call_id=call_id,
         source_audio_mode=source_device.get("audio_mode", "full_duplex"),
         dest_audio_mode=dest_device.get("audio_mode", "full_duplex"),
+        source_tx_formats=inbound.caller_tx_formats or _device_formats(source_device, "tx_formats"),
+        source_rx_formats=inbound.caller_rx_formats or _device_formats(source_device, "rx_formats"),
+        dest_tx_formats=_device_formats(dest_device, "tx_formats"),
+        dest_rx_formats=_device_formats(dest_device, "rx_formats"),
     )
     _bridges[bridge_id] = bridge
     result = await bridge.start()
@@ -1317,6 +1389,10 @@ async def _ring_ha_for_inbound_call(
         call_id=call_id,
         caller_name=caller_name,
         audio_mode=source_device.get("audio_mode", "full_duplex"),
+        local_tx_formats=list(HA_BROWSER_TX_FORMATS),
+        local_rx_formats=list(HA_BROWSER_RX_FORMATS),
+        peer_tx_formats=inbound.caller_tx_formats or _device_formats(source_device, "tx_formats"),
+        peer_rx_formats=inbound.caller_rx_formats or _device_formats(source_device, "rx_formats"),
     )
     if await session.start_ringing(caller_name=caller_name):
         _sessions[source_device_id] = session
@@ -1430,6 +1506,8 @@ async def _async_start_tcp_socket_manager(hass: HomeAssistant) -> bool:
         call_id: str,
         host: str,
         transport,
+        caller_tx_formats: list[AudioFormat],
+        caller_rx_formats: list[AudioFormat],
     ) -> None:
         await _route_inbound_call_pbx_lite(
             hass,
@@ -1442,6 +1520,8 @@ async def _async_start_tcp_socket_manager(hass: HomeAssistant) -> bool:
                 call_id=call_id,
                 port=0,
                 transport=transport,
+                caller_tx_formats=caller_tx_formats,
+                caller_rx_formats=caller_rx_formats,
             ),
         )
 

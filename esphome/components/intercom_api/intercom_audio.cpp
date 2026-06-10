@@ -18,6 +18,7 @@ static const char *const TAG = "intercom_api.audio";
 static constexpr uint8_t MAX_TX_BURST = 4;
 
 void IntercomApi::debug_log_pcm_level_(const char *label, const uint8_t *pcm, size_t bytes,
+                                       const AudioFormat &format,
                                        uint32_t &last_log_ms, uint32_t &frame_count) {
   frame_count++;
   const uint32_t now = millis();
@@ -29,6 +30,19 @@ void IntercomApi::debug_log_pcm_level_(const char *label, const uint8_t *pcm, si
   if (pcm == nullptr || samples == 0) {
     ESP_LOGI(TAG, "AudioDebug[%s]: frames=%u bytes=%u empty state=%s",
              label, frame_count, (unsigned) bytes, this->get_call_state_str());
+    return;
+  }
+
+  if (format.pcm_format != PcmFormat::S16LE) {
+    ESP_LOGI(TAG,
+             "AudioDebug[%s]: frames=%u bytes=%u format=%u:%u:%u:%u levels=skipped_non_s16 "
+             "intercom_volume=%.3f state=%s",
+             label, frame_count, (unsigned) bytes,
+             (unsigned) format.sample_rate,
+             (unsigned) format.pcm_format,
+             (unsigned) format.channels,
+             (unsigned) format.frame_ms,
+             this->volume_.load(std::memory_order_relaxed), this->get_call_state_str());
     return;
   }
 
@@ -60,17 +74,19 @@ void IntercomApi::send_chunk_(const uint8_t *data, size_t length) {
     return;
   if (this->audio_debug_) {
     this->debug_log_pcm_level_("tx_network", data, length,
+                               this->tx_audio_format_,
                                this->audio_debug_last_tx_log_ms_, this->audio_debug_tx_frames_);
   }
   this->transport_->send_audio_frame(data, length);
 }
 
 void IntercomApi::process_tx_chunk_(const uint8_t *audio_chunk) {
-  this->send_chunk_(audio_chunk, AUDIO_CHUNK_BYTES);
+  this->send_chunk_(audio_chunk, this->tx_audio_chunk_bytes_());
 }
 
 bool IntercomApi::read_tx_chunk_(uint8_t *audio_chunk) {
-  return this->mic_buffer_->read(audio_chunk, AUDIO_CHUNK_BYTES, 0) == AUDIO_CHUNK_BYTES;
+  const size_t frame_bytes = this->tx_audio_chunk_bytes_();
+  return this->mic_buffer_->read(audio_chunk, frame_bytes, 0) == frame_bytes;
 }
 
 void IntercomApi::tx_task_() {
@@ -79,13 +95,14 @@ void IntercomApi::tx_task_() {
   uint8_t *const audio_chunk = this->tx_audio_chunk_;
 
   while (true) {
-    if (!this->is_tx_stream_ready_() || this->mic_buffer_->available() < AUDIO_CHUNK_BYTES) {
+    const size_t frame_bytes = this->tx_audio_chunk_bytes_();
+    if (!this->is_tx_stream_ready_() || this->mic_buffer_->available() < frame_bytes) {
       ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
       continue;
     }
 
     uint8_t burst = 0;
-    while (this->is_tx_stream_ready_() && this->mic_buffer_->available() >= AUDIO_CHUNK_BYTES &&
+    while (this->is_tx_stream_ready_() && this->mic_buffer_->available() >= frame_bytes &&
            burst < MAX_TX_BURST) {
       if (!this->read_tx_chunk_(audio_chunk)) {
         break;
@@ -111,10 +128,6 @@ void IntercomApi::on_microphone_data_(const uint8_t *data, size_t len) {
     return;
   }
 
-  // intercom_api accepts 16-bit mono PCM at 16 kHz. Direct microphones are
-  // validated at config time; MicrophoneSource converts raw/experimental mics.
-  const int16_t *src = reinterpret_cast<const int16_t *>(data);
-  const size_t total_samples = len / sizeof(int16_t);
   // Skip our gain when esp_audio_stack owns the mic_gain entity (already applied upstream).
   int16_t *mic_converted = this->mic_converted_.load(std::memory_order_acquire);
   const float effective_gain = mic_converted != nullptr
@@ -124,11 +137,13 @@ void IntercomApi::on_microphone_data_(const uint8_t *data, size_t len) {
       mic_converted != nullptr && (effective_gain != 1.0f || this->dc_offset_removal_);
 
   if (needs_processing) {
+    const int16_t *src = reinterpret_cast<const int16_t *>(data);
+    const size_t total_samples = len / sizeof(int16_t);
     // Chunk by MIC_CONVERTED_SAMPLES so a long mic frame doesn't overflow
     // the staging buffer when gain/DC processing is on.
     size_t off = 0;
     while (off < total_samples) {
-      const size_t chunk = std::min(total_samples - off, kMicConvertedSamples);
+      const size_t chunk = std::min(total_samples - off, this->mic_processing_samples_());
       if (this->dc_offset_removal_) {
         for (size_t i = 0; i < chunk; i++) {
           mic_converted[i] = scale_sample(this->dc_blocker_.process(src[off + i]), effective_gain);

@@ -2,6 +2,8 @@
 
 #ifdef USE_ESP32
 
+#include <algorithm>
+
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
@@ -28,13 +30,17 @@ static const char *const TAG = "intercom_api";
 
 bool IntercomApi::ensure_mic_processing_buffer_() {
 #ifdef USE_INTERCOM_API_MIC
+  if (this->tx_audio_format_.pcm_format != PcmFormat::S16LE) {
+    ESP_LOGE(TAG, "mic_gain and dc_offset_removal require intercom_api.audio.tx.pcm_format: s16le");
+    return false;
+  }
   if (this->mic_converted_.load(std::memory_order_acquire) != nullptr)
     return true;
 
   RAMAllocator<int16_t> alloc = this->buffers_in_psram_
       ? RAMAllocator<int16_t>()
       : RAMAllocator<int16_t>(RAMAllocator<int16_t>::ALLOC_INTERNAL);
-  int16_t *buf = alloc.allocate(kMicConvertedSamples);
+  int16_t *buf = alloc.allocate(this->mic_processing_samples_());
   if (buf == nullptr) {
     ESP_LOGE(TAG, "Failed to allocate mic processing buffer");
     return false;
@@ -42,7 +48,7 @@ bool IntercomApi::ensure_mic_processing_buffer_() {
   int16_t *expected = nullptr;
   if (!this->mic_converted_.compare_exchange_strong(
           expected, buf, std::memory_order_release, std::memory_order_acquire)) {
-    alloc.deallocate(buf, kMicConvertedSamples);
+    alloc.deallocate(buf, this->mic_processing_samples_());
   }
   return true;
 #else
@@ -60,12 +66,12 @@ void IntercomApi::cleanup_partial_setup_() {
 
   RAMAllocator<int16_t> i16_alloc;
   if (int16_t *mic_converted = this->mic_converted_.exchange(nullptr, std::memory_order_acq_rel)) {
-    i16_alloc.deallocate(mic_converted, kMicConvertedSamples);
+    i16_alloc.deallocate(mic_converted, this->mic_processing_samples_());
   }
 
   RAMAllocator<uint8_t> u8_alloc;
   if (this->tx_audio_chunk_ != nullptr) {
-    u8_alloc.deallocate(this->tx_audio_chunk_, IntercomApi::kTxAudioChunkBytes);
+    u8_alloc.deallocate(this->tx_audio_chunk_, this->tx_audio_chunk_bytes_());
     this->tx_audio_chunk_ = nullptr;
   }
 
@@ -77,17 +83,25 @@ void IntercomApi::cleanup_partial_setup_() {
 bool IntercomApi::allocate_setup_buffers_() {
 #ifdef USE_INTERCOM_API_MIC
   if (this->has_microphone_()) {
+    const size_t tx_frame_bytes = this->tx_audio_chunk_bytes_();
+    const size_t tx_buffer_bytes = std::max<size_t>(tx_frame_bytes * 4, tx_frame_bytes + 1024);
     this->mic_buffer_ = this->buffers_in_psram_
-        ? audio_processor::create_prefer_psram(TX_BUFFER_SIZE, "intercom.mic")
-        : audio_processor::create_internal(TX_BUFFER_SIZE, "intercom.mic");
+        ? audio_processor::create_prefer_psram(tx_buffer_bytes, "intercom.mic")
+        : audio_processor::create_internal(tx_buffer_bytes, "intercom.mic");
     if (!this->mic_buffer_) {
       ESP_LOGE(TAG, "Failed to allocate mic ring buffer");
       return false;
     }
   }
 
-  if (this->has_microphone_() && this->dc_offset_removal_ && !this->ensure_mic_processing_buffer_()) {
-    return false;
+  if (this->has_microphone_() && this->dc_offset_removal_) {
+    if (this->tx_audio_format_.pcm_format != PcmFormat::S16LE) {
+      ESP_LOGE(TAG, "dc_offset_removal requires intercom_api.audio.tx.pcm_format: s16le");
+      return false;
+    }
+    if (!this->ensure_mic_processing_buffer_()) {
+      return false;
+    }
   }
 
   // Per-iteration drain buffers; same placement policy as above.
@@ -95,7 +109,7 @@ bool IntercomApi::allocate_setup_buffers_() {
       ? RAMAllocator<uint8_t>()
       : RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::ALLOC_INTERNAL);
   if (this->has_microphone_()) {
-    this->tx_audio_chunk_ = psram_u8.allocate(IntercomApi::kTxAudioChunkBytes);
+    this->tx_audio_chunk_ = psram_u8.allocate(this->tx_audio_chunk_bytes_());
     if (!this->tx_audio_chunk_) {
       ESP_LOGE(TAG, "Failed to allocate tx audio chunk buffer");
       return false;
@@ -505,14 +519,41 @@ std::string IntercomApi::build_endpoint_string_() const {
     return "";
   }
 
-  char buf[192];
+  auto format_token = [](const AudioFormat &fmt) -> std::string {
+    const char *pcm = "s16le";
+    switch (fmt.pcm_format) {
+      case PcmFormat::S16LE:
+        pcm = "s16le";
+        break;
+      case PcmFormat::S24LE:
+        pcm = "s24le";
+        break;
+      case PcmFormat::S24LE_IN_S32:
+        pcm = "s24le_in_s32";
+        break;
+      case PcmFormat::S32LE:
+        pcm = "s32le";
+        break;
+      default:
+        pcm = "s16le";
+        break;
+    }
+    char token[48];
+    snprintf(token, sizeof(token), "%u:%s:%u:%u",
+             (unsigned) fmt.sample_rate, pcm,
+             (unsigned) fmt.channels, (unsigned) fmt.frame_ms);
+    return token;
+  };
+  const std::string tx = format_token(this->tx_audio_format_);
+  const std::string rx = format_token(this->rx_audio_format_);
+  char buf[320];
   if (this->protocol_ == TransportType::UDP) {
-    snprintf(buf, sizeof(buf), "%s | udp | %s | %u | %u | %s", name.c_str(), ip.c_str(),
+    snprintf(buf, sizeof(buf), "%s | udp | %s | %u | %u | %s | %s | %s", name.c_str(), ip.c_str(),
              (unsigned) this->listen_port_, (unsigned) this->control_port_,
-             this->audio_capability_());
+             this->audio_capability_(), tx.c_str(), rx.c_str());
   } else {
-    snprintf(buf, sizeof(buf), "%s | tcp | %s | %u | %s", name.c_str(), ip.c_str(),
-             (unsigned) this->tcp_port_, this->audio_capability_());
+    snprintf(buf, sizeof(buf), "%s | tcp | %s | %u | %s | %s | %s", name.c_str(), ip.c_str(),
+             (unsigned) this->tcp_port_, this->audio_capability_(), tx.c_str(), rx.c_str());
   }
   return buf;
 }

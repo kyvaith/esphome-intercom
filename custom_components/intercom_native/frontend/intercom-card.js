@@ -522,11 +522,10 @@ class IntercomCard extends HTMLElement {
         }
       }
 
-      // CRITICAL: Cleanup audio when ESP goes to Idle
+      // The HA session/audio websocket is authoritative for browser audio
+      // teardown. The mirrored ESP state can briefly report idle during a
+      // HA-originated call and must not close the page-level engine.
       if (espStateChanged && newEspState === "idle") {
-        if (this._hasBrowserAudioPath() && !this._starting) {
-          intercomEngine.close("esp_idle");
-        }
         this._errorMsg = "";
         this._autoAnswering = false;
         if (!this._lastEndInfo) this._captureMirroredLastReason();
@@ -1220,6 +1219,7 @@ class IntercomCard extends HTMLElement {
     const destRow = document.createElement("div");
     destRow.className = "destination-row";
     const prevBtn = document.createElement("button");
+    prevBtn.type = "button";
     prevBtn.className = "nav-btn";
     prevBtn.title = "Previous";
     prevBtn.textContent = "<";
@@ -1239,6 +1239,7 @@ class IntercomCard extends HTMLElement {
     destSelect.hidden = true;
     destValueWrap.appendChild(destSelect);
     const nextBtn = document.createElement("button");
+    nextBtn.type = "button";
     nextBtn.className = "nav-btn";
     nextBtn.title = "Next";
     nextBtn.textContent = ">";
@@ -1267,18 +1268,23 @@ class IntercomCard extends HTMLElement {
     const buttonContainer = document.createElement("div");
     buttonContainer.className = "button-container";
     const answerBtn = document.createElement("button");
+    answerBtn.type = "button";
     answerBtn.className = "intercom-button small answer";
     answerBtn.textContent = "Answer";
     const declineBtn = document.createElement("button");
+    declineBtn.type = "button";
     declineBtn.className = "intercom-button small decline";
     declineBtn.textContent = "Decline";
     const hangupBtn = document.createElement("button");
+    hangupBtn.type = "button";
     hangupBtn.className = "intercom-button hangup";
     hangupBtn.textContent = "Hangup";
     const callBtn = document.createElement("button");
+    callBtn.type = "button";
     callBtn.className = "intercom-button call";
     callBtn.textContent = "Call";
     const placeholderBtn = document.createElement("button");
+    placeholderBtn.type = "button";
     placeholderBtn.className = "intercom-button";
     placeholderBtn.textContent = "...";
     placeholderBtn.disabled = true;

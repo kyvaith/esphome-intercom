@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import struct
 
+from .audio_format import AudioFormat, LEGACY_AUDIO_FORMAT, audio_format_from_wire
 from .const import (
     HEADER_SIZE,
     MAX_CALL_ID_LEN,
@@ -18,8 +19,11 @@ from .const import (
 )
 
 
-MAX_PAYLOAD_SIZE = 2048
+MAX_PAYLOAD_SIZE = 0xFFFF
 _HEADER_STRUCT = struct.Struct("<BH")
+_FORMAT_STRUCT = struct.Struct("<IBBH")
+_START_V2_MAGIC = b"ICAF2"
+_ANSWER_V2_MAGIC = b"ICAA2"
 
 
 def build_header(msg_type: int, length: int) -> bytes:
@@ -86,21 +90,110 @@ def decode_lp_string(data: bytes) -> tuple[str, int]:
     return data[1 : 1 + n].decode("utf-8", errors="replace"), 1 + n
 
 
+def _normalise_formats(formats: list[AudioFormat] | tuple[AudioFormat, ...] | None) -> list[AudioFormat]:
+    if not formats:
+        return [LEGACY_AUDIO_FORMAT]
+    out = [fmt if isinstance(fmt, AudioFormat) else AudioFormat(**fmt) for fmt in formats]
+    if len(out) > 8:
+        raise ValueError("too many audio formats (max 8)")
+    return out
+
+
+def _encode_audio_format(fmt: AudioFormat) -> bytes:
+    return _FORMAT_STRUCT.pack(fmt.sample_rate, fmt.format_id, fmt.channels, fmt.frame_ms)
+
+
+def _decode_audio_format(data: bytes, off: int) -> tuple[AudioFormat, int]:
+    if len(data) < off + _FORMAT_STRUCT.size:
+        raise ValueError("audio format truncated")
+    sample_rate, format_id, channels, frame_ms = _FORMAT_STRUCT.unpack_from(data, off)
+    return audio_format_from_wire(sample_rate, format_id, channels, frame_ms), off + _FORMAT_STRUCT.size
+
+
+def _encode_format_list(formats: list[AudioFormat]) -> bytes:
+    return bytes((len(formats),)) + b"".join(_encode_audio_format(fmt) for fmt in formats)
+
+
+def _decode_format_list(data: bytes, off: int) -> tuple[list[AudioFormat], int]:
+    if len(data) < off + 1:
+        raise ValueError("audio format list missing count")
+    count = data[off]
+    off += 1
+    if count == 0:
+        raise ValueError("audio format list is empty")
+    formats: list[AudioFormat] = []
+    for _ in range(count):
+        fmt, off = _decode_audio_format(data, off)
+        formats.append(fmt)
+    return formats, off
+
+
+def _all_legacy(*format_lists: list[AudioFormat]) -> bool:
+    return all(formats == [LEGACY_AUDIO_FORMAT] for formats in format_lists)
+
+
+def _encode_start_v2(caller_tx_formats: list[AudioFormat], caller_rx_formats: list[AudioFormat]) -> bytes:
+    return (
+        _START_V2_MAGIC
+        + bytes((1,))
+        + _encode_format_list(caller_tx_formats)
+        + _encode_format_list(caller_rx_formats)
+    )
+
+
+def _decode_start_v2(data: bytes, off: int) -> tuple[dict, int]:
+    if len(data) == off:
+        return {
+            "protocol_version": 1,
+            "caller_tx_formats": [LEGACY_AUDIO_FORMAT],
+            "caller_rx_formats": [LEGACY_AUDIO_FORMAT],
+        }, off
+    if not data.startswith(_START_V2_MAGIC, off):
+        raise ValueError("unknown START extension")
+    off += len(_START_V2_MAGIC)
+    if len(data) < off + 1:
+        raise ValueError("START extension missing version")
+    version = data[off]
+    off += 1
+    if version != 1:
+        raise ValueError(f"unsupported START audio extension version {version}")
+    caller_tx_formats, off = _decode_format_list(data, off)
+    caller_rx_formats, off = _decode_format_list(data, off)
+    return {
+        "protocol_version": 2,
+        "caller_tx_formats": caller_tx_formats,
+        "caller_rx_formats": caller_rx_formats,
+    }, off
+
+
 def build_start_body(
     call_id: str,
     caller_route: str,
     caller_name: str,
     dest_route: str,
     dest_name: str,
+    *,
+    caller_tx_formats: list[AudioFormat] | tuple[AudioFormat, ...] | None = None,
+    caller_rx_formats: list[AudioFormat] | tuple[AudioFormat, ...] | None = None,
 ) -> bytes:
-    """MSG_START body: prefix + caller_route + caller_name + dest_route + dest_name."""
-    return (
+    """MSG_START body with optional v2 audio capabilities.
+
+    Legacy senders produce the exact v1 body. v2 senders append the extension
+    only when advertising non-legacy capabilities; v2 peers then negotiate each
+    direction separately and confirm the selected formats in ANSWER.
+    """
+    tx_formats = _normalise_formats(caller_tx_formats)
+    rx_formats = _normalise_formats(caller_rx_formats)
+    base = (
         encode_call_id_prefix(call_id)
         + encode_lp_string(caller_route, MAX_ROUTE_ID_LEN)
         + encode_lp_string(caller_name, MAX_NAME_LEN)
         + encode_lp_string(dest_route, MAX_ROUTE_ID_LEN)
         + encode_lp_string(dest_name, MAX_NAME_LEN)
     )
+    if _all_legacy(tx_formats, rx_formats):
+        return base
+    return base + _encode_start_v2(tx_formats, rx_formats)
 
 
 def parse_start_body(body: bytes) -> dict:
@@ -114,18 +207,66 @@ def parse_start_body(body: bytes) -> dict:
     off += n
     dest_name, n = decode_lp_string(body[off:])
     off += n
+    ext, off = _decode_start_v2(body, off)
+    if off != len(body):
+        raise ValueError(f"START body has {len(body) - off} trailing bytes")
     return {
         "call_id": call_id,
         "caller_route": caller_route,
         "caller_name": caller_name,
         "dest_route": dest_route,
         "dest_name": dest_name,
+        **ext,
     }
 
 
 def build_call_id_only_body(call_id: str) -> bytes:
     """Body for MSG_RING / MSG_ANSWER / MSG_HANGUP (just the prefix)."""
     return encode_call_id_prefix(call_id)
+
+
+def build_answer_body(
+    call_id: str,
+    *,
+    caller_to_dest_format: AudioFormat | None = None,
+    dest_to_caller_format: AudioFormat | None = None,
+) -> bytes:
+    body = encode_call_id_prefix(call_id)
+    c2d = caller_to_dest_format or LEGACY_AUDIO_FORMAT
+    d2c = dest_to_caller_format or LEGACY_AUDIO_FORMAT
+    if c2d == LEGACY_AUDIO_FORMAT and d2c == LEGACY_AUDIO_FORMAT:
+        return body
+    return body + _ANSWER_V2_MAGIC + bytes((1,)) + _encode_audio_format(c2d) + _encode_audio_format(d2c)
+
+
+def parse_answer_body(body: bytes) -> dict:
+    call_id, off = decode_call_id_prefix(body)
+    if off == len(body):
+        return {
+            "call_id": call_id,
+            "protocol_version": 1,
+            "caller_to_dest_format": LEGACY_AUDIO_FORMAT,
+            "dest_to_caller_format": LEGACY_AUDIO_FORMAT,
+        }
+    if not body.startswith(_ANSWER_V2_MAGIC, off):
+        raise ValueError("unknown ANSWER extension")
+    off += len(_ANSWER_V2_MAGIC)
+    if len(body) < off + 1:
+        raise ValueError("ANSWER extension missing version")
+    version = body[off]
+    off += 1
+    if version != 1:
+        raise ValueError(f"unsupported ANSWER audio extension version {version}")
+    caller_to_dest, off = _decode_audio_format(body, off)
+    dest_to_caller, off = _decode_audio_format(body, off)
+    if off != len(body):
+        raise ValueError(f"ANSWER body has {len(body) - off} trailing bytes")
+    return {
+        "call_id": call_id,
+        "protocol_version": 2,
+        "caller_to_dest_format": caller_to_dest,
+        "dest_to_caller_format": dest_to_caller,
+    }
 
 
 def build_decline_body(call_id: str, reason: str = "") -> bytes:

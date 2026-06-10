@@ -43,6 +43,8 @@ def _load_intercom_module(name: str):
 
 
 const = _load_intercom_module("const")
+audio_format = _load_intercom_module("audio_format")
+audio_pcm = _load_intercom_module("audio_pcm")
 protocol = _load_intercom_module("protocol")
 fsm = _load_intercom_module("fsm")
 audio_ws = _load_intercom_module("audio_ws")
@@ -169,12 +171,26 @@ class FakeTransport:
         self.stop_count = 0
         self.disconnect_count = 0
         self.audio_sent = []
+        self.peer_tx_formats = [audio_format.LEGACY_AUDIO_FORMAT]
+        self.peer_rx_formats = [audio_format.LEGACY_AUDIO_FORMAT]
+        self.local_tx_formats = [audio_format.LEGACY_AUDIO_FORMAT]
+        self.local_rx_formats = [audio_format.LEGACY_AUDIO_FORMAT]
+        self.caller_to_dest_format = audio_format.LEGACY_AUDIO_FORMAT
+        self.dest_to_caller_format = audio_format.LEGACY_AUDIO_FORMAT
 
     def set_callbacks(self, callbacks):
         self.callbacks = callbacks
 
     def set_call_context(self, *_args):
         pass
+
+    def set_local_audio_formats(self, tx_formats, rx_formats):
+        self.local_tx_formats = tx_formats
+        self.local_rx_formats = rx_formats
+
+    def set_selected_audio_formats(self, caller_to_dest, dest_to_caller):
+        self.caller_to_dest_format = caller_to_dest
+        self.dest_to_caller_format = dest_to_caller
 
     async def connect(self):
         return True
@@ -215,16 +231,16 @@ class FakeWebSocket:
 
 class IntercomProtocolFixturesTest(unittest.TestCase):
     def test_binary_audio_frame_round_trip(self) -> None:
-        payload = bytes((i & 0xFF) for i in range(audio_ws.AUDIO_CHUNK_BYTES))
+        payload = bytes((i & 0xFF) for i in range(audio_ws.LEGACY_AUDIO_CHUNK_BYTES))
         frame = audio_ws.encode_audio_frame(payload)
         self.assertEqual(frame[0], audio_ws.AUDIO_FRAME_TYPE)
         self.assertEqual(audio_ws.decode_audio_frame(frame), payload)
 
     def test_binary_audio_frame_rejects_wrong_shape(self) -> None:
         with self.assertRaises(ValueError):
-            audio_ws.encode_audio_frame(b"short")
+            audio_ws.encode_audio_frame(b"")
         with self.assertRaises(ValueError):
-            audio_ws.decode_audio_frame(bytes((audio_ws.AUDIO_FRAME_TYPE + 1,)) + (b"\0" * audio_ws.AUDIO_CHUNK_BYTES))
+            audio_ws.decode_audio_frame(bytes((audio_ws.AUDIO_FRAME_TYPE + 1,)) + (b"\0" * audio_ws.LEGACY_AUDIO_CHUNK_BYTES))
 
     def test_ping_frame_fixture(self) -> None:
         body = protocol.build_call_id_only_body("")
@@ -244,8 +260,114 @@ class IntercomProtocolFixturesTest(unittest.TestCase):
                 "caller_name": "Panel A",
                 "dest_route": "B",
                 "dest_name": "Panel B",
+                "protocol_version": 1,
+                "caller_tx_formats": [audio_format.LEGACY_AUDIO_FORMAT],
+                "caller_rx_formats": [audio_format.LEGACY_AUDIO_FORMAT],
             },
         )
+
+    def test_audio_format_primitives(self) -> None:
+        fmt = audio_format.AudioFormat(
+            sample_rate=48000,
+            pcm_format=audio_format.PcmFormat.S24LE,
+            channels=1,
+            frame_ms=20,
+        )
+        self.assertEqual(fmt.significant_bits, 24)
+        self.assertEqual(fmt.container_bytes_per_sample, 3)
+        self.assertEqual(fmt.nominal_frame_samples, 960)
+        self.assertEqual(fmt.nominal_frame_bytes, 2880)
+        self.assertTrue(fmt.exact_frame_samples)
+        self.assertEqual(audio_format.parse_audio_format_token("44100:s16le:1:20").nominal_frame_samples, 882)
+        with self.assertRaises(ValueError):
+            audio_format.AudioFormat(sample_rate=44100, pcm_format="s16le", channels=1, frame_ms=32)
+
+    def test_start_v2_carries_directional_audio_capabilities(self) -> None:
+        tx = [
+            audio_format.AudioFormat(16000, "s16le", 1, 32),
+            audio_format.AudioFormat(48000, "s24le_in_s32", 1, 20),
+        ]
+        rx = [audio_format.AudioFormat(44100, "s32le", 2, 20)]
+        body = protocol.build_start_body(
+            "A<->B",
+            "A",
+            "Panel A",
+            "B",
+            "Panel B",
+            caller_tx_formats=tx,
+            caller_rx_formats=rx,
+        )
+        parsed = protocol.parse_start_body(body)
+        self.assertEqual(parsed["protocol_version"], 2)
+        self.assertEqual(parsed["caller_tx_formats"], tx)
+        self.assertEqual(parsed["caller_rx_formats"], rx)
+
+    def test_answer_v2_confirms_selected_direction_formats(self) -> None:
+        c2d = audio_format.AudioFormat(32000, "s16le", 1, 20)
+        d2c = audio_format.AudioFormat(48000, "s24le", 1, 10)
+        body = protocol.build_answer_body(
+            "A<->B",
+            caller_to_dest_format=c2d,
+            dest_to_caller_format=d2c,
+        )
+        parsed = protocol.parse_answer_body(body)
+        self.assertEqual(parsed["protocol_version"], 2)
+        self.assertEqual(parsed["caller_to_dest_format"], c2d)
+        self.assertEqual(parsed["dest_to_caller_format"], d2c)
+
+    def test_pcm_conversion_supports_common_containers_and_resampling(self) -> None:
+        src = audio_format.AudioFormat(16000, "s16le", 1, 20)
+        dst = audio_format.AudioFormat(48000, "s32le", 2, 20)
+        samples = [0, 8192, -8192, 16384] * 80
+        raw = b"".join(int(sample).to_bytes(2, "little", signed=True) for sample in samples)
+        converted = audio_pcm.convert_audio_frame(raw, src, dst)
+        self.assertEqual(len(converted), dst.nominal_frame_bytes)
+
+        back = audio_pcm.convert_audio_frame(converted, dst, src)
+        self.assertEqual(len(back), src.nominal_frame_bytes)
+        self.assertNotEqual(back, b"\0" * len(back))
+
+    def test_pcm_conversion_preserves_s24_container_sizes(self) -> None:
+        src = audio_format.AudioFormat(48000, "s24le", 1, 10)
+        dst = audio_format.AudioFormat(48000, "s24le_in_s32", 1, 10)
+        raw = b"\x00\x00\x00" * src.nominal_frame_samples
+        converted = audio_pcm.convert_audio_frame(raw, src, dst)
+        self.assertEqual(len(converted), dst.nominal_frame_bytes)
+
+    def test_pcm_conversion_matrix_for_supported_rates_and_containers(self) -> None:
+        legacy = audio_format.LEGACY_AUDIO_FORMAT
+        for rate in sorted(audio_format.SUPPORTED_SAMPLE_RATES):
+            for pcm in audio_format.PcmFormat:
+                with self.subTest(rate=rate, pcm=pcm.value):
+                    src = audio_format.AudioFormat(rate, pcm, 1, 20)
+                    raw = bytearray(src.nominal_frame_bytes)
+                    for i in range(src.nominal_frame_samples):
+                        sample = ((i % 64) - 32) / 32.0
+                        raw[i * src.container_bytes_per_sample:(i + 1) * src.container_bytes_per_sample] = (
+                            audio_pcm._encode_sample(sample, src.pcm_format)
+                        )
+                    converted = audio_pcm.convert_audio_frame(bytes(raw), src, legacy)
+                    self.assertEqual(len(converted), legacy.nominal_frame_bytes)
+                    roundtrip = audio_pcm.convert_audio_frame(converted, legacy, src)
+                    self.assertEqual(len(roundtrip), src.nominal_frame_bytes)
+                    self.assertNotEqual(converted, b"\0" * len(converted))
+
+    def test_browser_capabilities_include_legacy_afe_frame(self) -> None:
+        self.assertIn(audio_format.LEGACY_AUDIO_FORMAT, audio_format.HA_BROWSER_TX_FORMATS)
+        self.assertIn(audio_format.LEGACY_AUDIO_FORMAT, audio_format.HA_BROWSER_RX_FORMATS)
+
+    def test_udp_safe_payload_contract(self) -> None:
+        self.assertTrue(audio_format.LEGACY_AUDIO_FORMAT.udp_safe)
+        unsafe = audio_format.AudioFormat(48000, "s32le", 1, 20)
+        self.assertFalse(unsafe.udp_safe)
+        with self.assertRaises(ValueError):
+            audio_format.require_udp_safe_formats([unsafe], context="test udp")
+
+    def test_answer_v1_defaults_to_legacy_audio_format(self) -> None:
+        parsed = protocol.parse_answer_body(protocol.build_call_id_only_body("A<->B"))
+        self.assertEqual(parsed["protocol_version"], 1)
+        self.assertEqual(parsed["caller_to_dest_format"], audio_format.LEGACY_AUDIO_FORMAT)
+        self.assertEqual(parsed["dest_to_caller_format"], audio_format.LEGACY_AUDIO_FORMAT)
 
     def test_decline_reason_fixture(self) -> None:
         body = protocol.build_decline_body("A<->B", "DND")
@@ -385,7 +507,7 @@ class IntercomWebSocketSessionTest(unittest.IsolatedAsyncioTestCase):
         first, first_transport = await self._started_session("device-a")
         first_ws = FakeWebSocket()
         first.bind_audio_ws(first_ws)
-        first.queue_audio(b"\1" * audio_ws.AUDIO_CHUNK_BYTES)
+        first.queue_audio(b"\1" * audio_ws.LEGACY_AUDIO_CHUNK_BYTES)
         await asyncio.sleep(0)
 
         await first.unbind_audio_ws(first_ws)

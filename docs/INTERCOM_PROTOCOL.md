@@ -12,8 +12,9 @@ TCP and UDP use the same control message format.
 - TCP: every frame is `MessageHeader + body` on `tcp_port` (default 6054).
 - UDP control: every datagram is `MessageHeader + body` on
   `udp_control_port` (default 6055).
-- UDP audio: raw L16 PCM datagrams on `udp_audio_port` (default 6054). No
-  `MessageHeader` is present on the audio socket.
+- UDP audio: raw negotiated PCM datagrams on `udp_audio_port` (default 6054).
+  No `MessageHeader` is present on the audio socket. A full audio frame must
+  fit in one safe datagram; oversized UDP formats are rejected during setup.
 
 ## Header
 
@@ -31,14 +32,14 @@ struct onto the wire.
 
 | Code | Name | Body |
 |---:|---|---|
-| `0x01` | `AUDIO` | TCP-only raw L16 PCM bytes. UDP audio uses the audio socket without a header. |
-| `0x02` | `START` | `call_id` prefix + caller/destination strings. |
+| `0x01` | `AUDIO` | TCP-only negotiated raw PCM bytes. UDP audio uses the audio socket without a header. |
+| `0x02` | `START` | `call_id` prefix + caller/destination strings + optional audio capabilities. |
 | `0x03` | `HANGUP` | `call_id` only. Established-call BYE. |
 | `0x04` | `PING` | Empty call id prefix (`00`). |
 | `0x05` | `PONG` | Empty call id prefix (`00`). |
 | `0x06` | `ERROR` | `call_id` prefix + `error_code:u8` + detail string. |
 | `0x07` | `RING` | `call_id` only. Destination is ringing locally. |
-| `0x08` | `ANSWER` | `call_id` only. Destination accepted. |
+| `0x08` | `ANSWER` | `call_id` prefix + optional selected audio formats. Destination accepted. |
 | `0x09` | `DECLINE` | `call_id` prefix + reason string. |
 
 ## Body Strings
@@ -77,6 +78,7 @@ caller_route: lp-string
 caller_name:  lp-string
 dest_route:   lp-string
 dest_name:    lp-string
+[optional v2 audio extension]
 ```
 
 `call_id` remains human-readable: `Caller<->Destination`.
@@ -85,6 +87,59 @@ Friendly names are the public endpoint identity. `route` fields may be the same
 friendly name during the current protocol generation; implementations must not
 replace the display destination with HA when HA is only bridging a cross-protocol
 call.
+
+### START v2 Audio Extension
+
+Legacy 16 kHz/s16/mono/32 ms peers omit the extension. Peers that support other
+formats append:
+
+```text
+magic:   "ICAF2"
+version: u8 = 1
+caller_tx_formats: format-list   # caller microphone/source -> wire
+caller_rx_formats: format-list   # wire -> caller speaker/sink
+```
+
+A format list is `count:u8` followed by up to 8 `AudioFormat` entries:
+
+```text
+sample_rate: u32 little-endian
+pcm_format:  u8   # 1=s16le, 2=s24le, 3=s24le_in_s32, 4=s32le
+channels:    u8
+frame_ms:    u16 little-endian
+```
+
+Supported sample rates are `8000`, `12000`, `16000`, `24000`, `32000`,
+`44100` and `48000` Hz. Supported frame durations are `10`, `20` and `32` ms
+only when `sample_rate * frame_ms / 1000` is an integer number of samples.
+Channels are mono or stereo. 24-bit audio is explicit: packed `s24le` and
+24-bit samples carried in a 32-bit little-endian container (`s24le_in_s32`) are
+different PCM formats.
+
+Audio format is per direction, not per device. A device can legitimately
+transmit one format and receive another. If an ESP source is the Espressif
+AFE/AEC output, that branch is locally constrained to 16 kHz/s16/mono by
+esp-sr. Native ESPHome microphones/speakers and the browser softphone can use
+their declared formats independently.
+
+The effective format is the first compatible item from the constrained endpoint
+side. Home Assistant may bridge different formats by explicit PCM conversion.
+Direct ESP-to-ESP calls without a common format must fail with a readable
+`DECLINE("incompatible_audio_format")` or equivalent error; they must not fall
+back silently.
+
+## ANSWER
+
+Legacy peers send only the `call_id` prefix. v2 peers append the selected
+formats so the caller configures both audio directions deterministically:
+
+```text
+call_id_prefix
+magic: "ICAA2"
+version: u8 = 1
+caller_to_dest_format: AudioFormat
+dest_to_caller_format: AudioFormat
+```
 
 ## HANGUP vs DECLINE
 
@@ -126,15 +181,18 @@ Current code defines `BUSY = 0x01`, but normal busy signaling should prefer
 
 ## Audio
 
-| Parameter | Value |
-|---|---:|
-| Sample rate | 16000 Hz |
-| Format | signed 16-bit little-endian PCM |
-| Channels | mono |
-| Nominal frame | 512 samples / 1024 bytes / 32 ms |
+The legacy default is `16000:s16le:1:32`, which is 512 samples / 1024 bytes per
+frame. It remains the default for old peers and for AFE/AEC-backed branches.
 
-TCP `AUDIO` frames carry raw PCM as the body. UDP audio datagrams carry only raw
-PCM, without the 3-byte header.
+TCP `AUDIO` frames carry one complete negotiated PCM frame as the body. The
+header length is `u16`, so the protocol limit is 65535 bytes; implementations
+allocate only the negotiated frame size.
+
+UDP audio datagrams carry one complete negotiated PCM frame without the 3-byte
+header. The implementation intentionally avoids relying on IP fragmentation:
+UDP formats whose frame payload exceeds 1200 bytes are rejected with
+`unsupported_udp_audio_format`. Use TCP or lower sample rate/channel/container
+size/frame duration for larger PCM formats.
 
 ## Keepalive
 

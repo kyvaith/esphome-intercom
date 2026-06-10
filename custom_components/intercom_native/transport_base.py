@@ -14,6 +14,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
+from .audio_format import AudioFormat, LEGACY_AUDIO_FORMAT
 from .const import (
     MSG_AUDIO,
     MSG_START,
@@ -81,6 +82,12 @@ class IntercomTransport(ABC):
         # terminal/control replies; reconstructing it from names is not safe
         # for bridged or cross-transport calls.
         self._call_id: str = ""
+        self.peer_tx_formats: list[AudioFormat] = [LEGACY_AUDIO_FORMAT]
+        self.peer_rx_formats: list[AudioFormat] = [LEGACY_AUDIO_FORMAT]
+        self.local_tx_formats: list[AudioFormat] = [LEGACY_AUDIO_FORMAT]
+        self.local_rx_formats: list[AudioFormat] = [LEGACY_AUDIO_FORMAT]
+        self.caller_to_dest_format: AudioFormat = LEGACY_AUDIO_FORMAT
+        self.dest_to_caller_format: AudioFormat = LEGACY_AUDIO_FORMAT
 
     # === Public API ===
 
@@ -106,6 +113,14 @@ class IntercomTransport(ABC):
         self._call_id = call_id or ""
         if caller_name:
             self.last_caller_name = caller_name
+
+    def set_selected_audio_formats(self, caller_to_dest: AudioFormat, dest_to_caller: AudioFormat) -> None:
+        self.caller_to_dest_format = caller_to_dest
+        self.dest_to_caller_format = dest_to_caller
+
+    def set_local_audio_formats(self, tx_formats: list[AudioFormat], rx_formats: list[AudioFormat]) -> None:
+        self.local_tx_formats = tx_formats
+        self.local_rx_formats = rx_formats
 
     def _gate_call_id(self, call_id: str, msg_name: str) -> bool:
         """Return True when a control frame belongs to a stale call."""
@@ -301,6 +316,8 @@ class IntercomTransport(ABC):
                     await self.send_decline_for_call_id(incoming_call_id, "busy")
                 return
             self.set_call_context(parsed["call_id"], caller)
+            self.peer_tx_formats = parsed["caller_tx_formats"]
+            self.peer_rx_formats = parsed["caller_rx_formats"]
         except ValueError as err:
             self._log_malformed("START", err)
             self.last_caller_name = caller
@@ -330,7 +347,12 @@ class IntercomTransport(ABC):
 
     def _handle_answer(self, payload: bytes) -> None:
         try:
-            call_id = self._parse_call_id_only(payload)
+            parsed = protocol.parse_answer_body(payload)
+            call_id = parsed["call_id"]
+            self.set_selected_audio_formats(
+                parsed["caller_to_dest_format"],
+                parsed["dest_to_caller_format"],
+            )
         except ValueError as err:
             self._log_malformed("ANSWER", err)
             return

@@ -7,7 +7,7 @@
 
 `2026.6.3` moves Lovelace/browser audio off Home Assistant's shared frontend
 WebSocket. The card now uses the authenticated `/api/intercom_native/ws`
-endpoint with binary 16 kHz PCM frames, one page-level audio engine and
+endpoint with negotiated binary PCM frames, one page-level audio engine and
 server-authoritative call teardown. Custom clients using the removed
 `intercom_native/audio` or `intercom_native/subscribe_audio` JSON/base64
 commands must migrate before upgrading. See
@@ -458,12 +458,21 @@ This is the whole product in one picture: HA is a transport hub and optional bri
 
 ### Audio format
 
-| Parameter | Value |
-|-----------|-------|
-| Sample Rate | 16000 Hz |
-| Bit Depth | 16-bit signed PCM |
-| Channels | Mono |
-| Frame size | 1024 bytes (512 samples = 32 ms) |
+The legacy/default intercom format is `16000:s16le:1:32`, but current
+PBX-lite peers negotiate audio per direction. AFE/AEC-backed branches still
+publish 16 kHz/s16/mono because Espressif esp-sr exposes that format; native
+ESPHome microphone/speaker paths and the HA browser softphone can advertise
+their actual PCM format up to 48 kHz and 32-bit containers.
+
+An audio format token is:
+
+```text
+sample_rate:pcm_format:channels:frame_ms
+```
+
+Supported PCM containers are `s16le`, `s24le`, `s24le_in_s32` and `s32le`.
+Supported rates are 8, 12, 16, 24, 32, 44.1 and 48 kHz, with 10/20/32 ms
+frames when the frame contains an integer number of samples.
 
 ### TCP protocol (default `tcp_port: 6054`)
 
@@ -481,8 +490,8 @@ The authoritative wire contract lives in [`docs/INTERCOM_PROTOCOL.md`](docs/INTE
 
 | Code | Name | Description |
 |------|------|-------------|
-| 0x01 | AUDIO   | Raw L16 PCM (no call_id prefix) |
-| 0x02 | START   | Initiate call; tail = caller_route, caller_name, dest_route, dest_name |
+| 0x01 | AUDIO   | Raw negotiated PCM (no call_id prefix) |
+| 0x02 | START   | Initiate call; tail = caller_route, caller_name, dest_route, dest_name, optional audio capabilities |
 | 0x03 | HANGUP  | Established-call BYE |
 | 0x04 | PING    | Keep-alive |
 | 0x05 | PONG    | Keep-alive response |
@@ -493,11 +502,11 @@ The authoritative wire contract lives in [`docs/INTERCOM_PROTOCOL.md`](docs/INTE
 
 ### UDP transport (default `udp_audio_port: 6054`, `udp_control_port: 6055`)
 
-UDP firmware variants (`*-intercom-udp.yaml`) carry the same `MessageHeader` framing on the control socket, with raw L16 PCM on the audio socket:
+UDP firmware variants (`*-intercom-udp.yaml`) carry the same `MessageHeader` framing on the control socket, with raw negotiated PCM on the audio socket:
 
 | Port | Direction | Payload |
 |------|-----------|---------|
-| `udp_audio_port` (default 6054, different protocol stack from TCP) | bidirectional | Raw L16 PCM 16 kHz mono, 1 datagram = 1 frame (1024 bytes = 32 ms). No header. Drop-in compatible with go2rtc raw-PCM stream sources. |
+| `udp_audio_port` (default 6054, different protocol stack from TCP) | bidirectional | Raw negotiated PCM, 1 datagram = 1 complete frame. No header. Formats above the safe datagram threshold are rejected; use TCP for larger 48 kHz / 32-bit frames. |
 | `udp_control_port` (default 6055) | bidirectional | `MessageHeader` (3 B) + payload, identical layout and Message Types to TCP above. |
 
 The audio socket is **lazy**: bound on the ESP only while the FSM is streaming/answering, never while idle. The control socket stays bound from boot so inbound `MSG_START` can wake the FSM (incoming-call ringing).
@@ -853,6 +862,8 @@ Canonical phonebook rows:
 Name|tcp|ip|tcp_port
 Name|udp|ip|udp_audio_port|udp_control_port
 Name|ha|ip|tcp_port|udp_audio_port|udp_control_port
+Name|tcp|ip|tcp_port|audio_mode|tx_formats|rx_formats
+Name|udp|ip|udp_audio_port|udp_control_port|audio_mode|tx_formats|rx_formats
 ```
 
 See [docs/PHONEBOOK_PROTOCOL.md](docs/PHONEBOOK_PROTOCOL.md) for the full contract.

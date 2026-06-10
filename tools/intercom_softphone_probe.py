@@ -7,8 +7,8 @@ Usage:
   tools/intercom_softphone_probe.py --target 192.168.1.47 --send-tone 880 --record-wav /tmp/ws3.wav
 
 When HA_TOKEN is available the script can also subscribe to Home Assistant's
-intercom_native.call_event stream. Audio on the wire is the project protocol:
-16 kHz mono signed 16-bit PCM, 512 samples / 1024 bytes per chunk.
+intercom_native.call_event stream. Audio on the wire uses the same negotiated
+PCM format tokens as the firmware, for example 16000:s16le:1:32.
 """
 
 from __future__ import annotations
@@ -25,11 +25,44 @@ import threading
 import time
 import urllib.request
 import wave
+import importlib.util
+from collections.abc import Callable
+from pathlib import Path
 
 
 INTERCOM_PORT = 6054
+ROOT = Path(__file__).resolve().parents[1]
+PKG_DIR = ROOT / "custom_components" / "intercom_native"
+PKG_NAME = "custom_components.intercom_native"
+
+
+def _load_intercom_module(name: str):
+    if "custom_components" not in sys.modules:
+        pkg = type(sys)("custom_components")
+        pkg.__path__ = [str(ROOT / "custom_components")]
+        sys.modules["custom_components"] = pkg
+    if PKG_NAME not in sys.modules:
+        pkg = type(sys)(PKG_NAME)
+        pkg.__path__ = [str(PKG_DIR)]
+        sys.modules[PKG_NAME] = pkg
+    full_name = f"{PKG_NAME}.{name}"
+    spec = importlib.util.spec_from_file_location(full_name, PKG_DIR / f"{name}.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {full_name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[full_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+audio_format_mod = _load_intercom_module("audio_format")
+protocol_mod = _load_intercom_module("protocol")
+audio_pcm_mod = _load_intercom_module("audio_pcm")
+AudioFormat = audio_format_mod.AudioFormat
+parse_audio_format_token = audio_format_mod.parse_audio_format_token
+
 HEADER_SIZE = 3
-MAX_PAYLOAD_SIZE = 2048
+MAX_PAYLOAD_SIZE = 0xFFFF
 MAX_CALL_ID_LEN = 64
 MAX_ROUTE_ID_LEN = 64
 MAX_NAME_LEN = 64
@@ -44,10 +77,7 @@ MSG_ANSWER = 0x08
 MSG_DECLINE = 0x09
 MSG_AUDIO = 0x01
 
-SAMPLE_RATE = 16000
-AUDIO_CHUNK_BYTES = 1024
-AUDIO_CHUNK_SAMPLES = AUDIO_CHUNK_BYTES // 2
-AUDIO_CHUNK_SECONDS = AUDIO_CHUNK_SAMPLES / SAMPLE_RATE
+DEFAULT_FORMAT = AudioFormat(16000, "s16le", 1, 32)
 
 
 OP_TEXT = 0x1
@@ -92,13 +122,17 @@ def build_start_body(
     caller_name: str,
     dest_route: str,
     dest_name: str,
+    caller_tx_formats: list[AudioFormat] | None = None,
+    caller_rx_formats: list[AudioFormat] | None = None,
 ) -> bytes:
-    return (
-        encode_call_id_prefix(call_id)
-        + encode_lp_string(caller_route, MAX_ROUTE_ID_LEN)
-        + encode_lp_string(caller_name, MAX_NAME_LEN)
-        + encode_lp_string(dest_route, MAX_ROUTE_ID_LEN)
-        + encode_lp_string(dest_name, MAX_NAME_LEN)
+    return protocol_mod.build_start_body(
+        call_id,
+        caller_route,
+        caller_name,
+        dest_route,
+        dest_name,
+        caller_tx_formats=caller_tx_formats,
+        caller_rx_formats=caller_rx_formats,
     )
 
 
@@ -126,6 +160,20 @@ def decode_lp_string(data: bytes) -> tuple[str, int]:
 
 def describe_payload(msg_type: int, payload: bytes) -> str:
     try:
+        if msg_type == MSG_START:
+            parsed = protocol_mod.parse_start_body(payload)
+            return (
+                f" call_id={parsed['call_id']!r}"
+                f" tx={[f.wire_token() for f in parsed['caller_tx_formats']]}"
+                f" rx={[f.wire_token() for f in parsed['caller_rx_formats']]}"
+            )
+        if msg_type == MSG_ANSWER:
+            parsed = protocol_mod.parse_answer_body(payload)
+            return (
+                f" call_id={parsed['call_id']!r}"
+                f" caller_to_dest={parsed['caller_to_dest_format'].wire_token()}"
+                f" dest_to_caller={parsed['dest_to_caller_format'].wire_token()}"
+            )
         if msg_type in (MSG_RING, MSG_ANSWER, MSG_HANGUP):
             call_id, _ = decode_call_id_prefix(payload)
             return f" call_id={call_id!r}"
@@ -361,6 +409,21 @@ def _read_control_frame(sock: socket.socket, timeout: float) -> tuple[int, bytes
         return None
 
 
+def _read_udp_control_frame(sock: socket.socket, timeout: float) -> tuple[int, bytes] | None:
+    sock.settimeout(timeout)
+    try:
+        data, _addr = sock.recvfrom(HEADER_SIZE + MAX_PAYLOAD_SIZE)
+    except socket.timeout:
+        return None
+    if not data:
+        return None
+    msg_type, length = parse_header(data)
+    payload = data[HEADER_SIZE : HEADER_SIZE + length]
+    if len(payload) != length:
+        raise ValueError(f"truncated UDP control payload ({len(payload)} != {length})")
+    return msg_type, payload
+
+
 def _message_name(msg_type: int) -> str:
     return {
         MSG_AUDIO: "AUDIO",
@@ -375,67 +438,93 @@ def _message_name(msg_type: int) -> str:
     }.get(msg_type, f"0x{msg_type:02X}")
 
 
-def _load_wav_chunks(path: str) -> list[bytes]:
+def _wav_format(path: str, wav: wave.Wave_read) -> AudioFormat:
+    width = wav.getsampwidth()
+    pcm = {2: "s16le", 3: "s24le", 4: "s32le"}.get(width)
+    if pcm is None:
+        raise ValueError(f"{path}: unsupported WAV sample width {width}")
+    return AudioFormat(wav.getframerate(), pcm, wav.getnchannels(), 20)
+
+
+def _chunk_bytes(fmt: AudioFormat) -> int:
+    return fmt.nominal_frame_bytes
+
+
+def _frame_seconds(fmt: AudioFormat) -> float:
+    return fmt.frame_ms / 1000.0
+
+
+def _load_wav_chunks(path: str, tx_format: AudioFormat) -> list[bytes]:
     with wave.open(path, "rb") as wav:
-        channels = wav.getnchannels()
-        sample_width = wav.getsampwidth()
-        sample_rate = wav.getframerate()
-        if channels != 1 or sample_width != 2 or sample_rate != SAMPLE_RATE:
-            raise ValueError(
-                f"{path}: expected mono s16le {SAMPLE_RATE}Hz WAV, "
-                f"got channels={channels} width={sample_width} rate={sample_rate}"
-            )
+        src_format = _wav_format(path, wav)
         raw = wav.readframes(wav.getnframes())
-    if len(raw) % 2:
-        raw = raw[:-1]
     chunks = []
-    for off in range(0, len(raw), AUDIO_CHUNK_BYTES):
-        chunk = raw[off : off + AUDIO_CHUNK_BYTES]
-        if len(chunk) < AUDIO_CHUNK_BYTES:
-            chunk += b"\x00" * (AUDIO_CHUNK_BYTES - len(chunk))
-        chunks.append(chunk)
+    src_frame_bytes = src_format.nominal_frame_bytes
+    for off in range(0, len(raw), src_frame_bytes):
+        chunk = raw[off : off + src_frame_bytes]
+        if len(chunk) < src_frame_bytes:
+            chunk += b"\x00" * (src_frame_bytes - len(chunk))
+        chunks.append(audio_pcm_mod.convert_audio_frame(chunk, src_format, tx_format))
     return chunks
 
 
-def _tone_chunks(freq_hz: float, seconds: float, amplitude: float) -> list[bytes]:
+def _encode_tone_sample(value: float, fmt: AudioFormat) -> bytes:
+    if fmt.pcm_format.value == "s16le":
+        sample = int(value * (32768 if value < 0 else 32767))
+        return sample.to_bytes(2, "little", signed=True)
+    if fmt.pcm_format.value == "s24le":
+        sample = int(value * (8388608 if value < 0 else 8388607))
+        return (sample & 0xFFFFFF).to_bytes(3, "little")
+    if fmt.pcm_format.value == "s24le_in_s32":
+        sample = int(value * (8388608 if value < 0 else 8388607)) << 8
+        return sample.to_bytes(4, "little", signed=True)
+    sample = int(value * (2147483648 if value < 0 else 2147483647))
+    return sample.to_bytes(4, "little", signed=True)
+
+
+def _tone_chunks(freq_hz: float, seconds: float, amplitude: float, tx_format: AudioFormat) -> list[bytes]:
     if seconds <= 0:
         return []
-    amplitude_i16 = max(0, min(32767, int(32767 * amplitude)))
-    total_samples = int(seconds * SAMPLE_RATE)
+    amplitude = max(0.0, min(1.0, amplitude))
+    total_samples = int(seconds * tx_format.sample_rate)
+    frame_samples = tx_format.nominal_frame_samples
     chunks = []
-    for base in range(0, total_samples, AUDIO_CHUNK_SAMPLES):
+    for base in range(0, total_samples, frame_samples):
         samples = bytearray()
-        for i in range(AUDIO_CHUNK_SAMPLES):
+        for i in range(frame_samples):
             n = base + i
             value = 0
             if n < total_samples:
-                value = int(amplitude_i16 * math.sin(2.0 * math.pi * freq_hz * n / SAMPLE_RATE))
-            samples.extend(struct.pack("<h", value))
+                value = amplitude * math.sin(2.0 * math.pi * freq_hz * n / tx_format.sample_rate)
+            encoded = _encode_tone_sample(value, tx_format)
+            for _ in range(tx_format.channels):
+                samples.extend(encoded)
         chunks.append(bytes(samples))
     return chunks
 
 
-def _audio_chunks_from_args(args: argparse.Namespace) -> list[bytes]:
+def _audio_chunks_from_args(args: argparse.Namespace, tx_format: AudioFormat) -> list[bytes]:
     if args.send_wav:
-        return _load_wav_chunks(args.send_wav)
+        return _load_wav_chunks(args.send_wav, tx_format)
     if args.send_tone:
-        return _tone_chunks(args.send_tone, args.tone_seconds, args.tone_amplitude)
+        return _tone_chunks(args.send_tone, args.tone_seconds, args.tone_amplitude, tx_format)
     return []
 
 
-def _write_recording(path: str, chunks: list[bytes]) -> None:
+def _write_recording(path: str, chunks: list[bytes], rx_format: AudioFormat) -> None:
     with wave.open(path, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(SAMPLE_RATE)
+        wav.setnchannels(rx_format.channels)
+        wav.setsampwidth(rx_format.container_bytes_per_sample)
+        wav.setframerate(rx_format.sample_rate)
         wav.writeframes(b"".join(chunks))
 
 
 class AudioSender:
-    def __init__(self, sock: socket.socket, chunks: list[bytes], repeat: bool) -> None:
-        self.sock = sock
+    def __init__(self, send_audio: Callable[[bytes], None], chunks: list[bytes], repeat: bool, frame_seconds: float) -> None:
+        self._send_audio = send_audio
         self.chunks = chunks
         self.repeat = repeat
+        self.frame_seconds = frame_seconds
         self.sent_chunks = 0
         self.sent_bytes = 0
         self._stop = threading.Event()
@@ -460,7 +549,7 @@ class AudioSender:
             chunk = self.chunks[index]
             try:
                 with self._lock:
-                    self.sock.sendall(build_frame(MSG_AUDIO, chunk))
+                    self._send_audio(chunk)
             except OSError:
                 return
             self.sent_chunks += 1
@@ -470,7 +559,7 @@ class AudioSender:
                 if not self.repeat:
                     return
                 index = 0
-            next_send += AUDIO_CHUNK_SECONDS
+            next_send += self.frame_seconds
             delay = next_send - time.monotonic()
             if delay > 0:
                 self._stop.wait(delay)
@@ -492,6 +581,10 @@ def run_probe(args: argparse.Namespace) -> int:
     config = _http_get_json(base_url, token, "/api/config") if ha_events_enabled else {}
     dest_name = args.dest_name or config.get("location_name") or "Home Assistant"
     call_id = args.call_id or f"{args.caller_name}<->{dest_name}:{int(time.time())}"
+    tx_formats = [parse_audio_format_token(token) for token in (args.tx_format or [DEFAULT_FORMAT.wire_token()])]
+    rx_formats = [parse_audio_format_token(token) for token in (args.rx_format or [DEFAULT_FORMAT.wire_token()])]
+    tx_format = tx_formats[0]
+    rx_format = rx_formats[0]
 
     collector = None
     if ha_events_enabled:
@@ -499,21 +592,66 @@ def run_probe(args: argparse.Namespace) -> int:
         collector.start()
         time.sleep(0.3)
 
-    audio_chunks = _audio_chunks_from_args(args)
+    sender_format = tx_format
+    audio_chunks = _audio_chunks_from_args(args, sender_format)
     rx_audio: list[bytes] = []
-    sock = socket.create_connection((target_host, args.port), timeout=5)
-    sender = AudioSender(sock, audio_chunks, args.repeat_audio)
+    transport = args.transport
+    sock: socket.socket | None = None
+    audio_sock: socket.socket | None = None
+    control_target = (target_host, args.udp_control_port)
+    audio_target = (target_host, args.udp_audio_port)
+
+    if transport == "tcp":
+        sock = socket.create_connection((target_host, args.port), timeout=5)
+
+        def send_control_frame(msg_type: int, body: bytes = b"") -> None:
+            assert sock is not None
+            sock.sendall(build_frame(msg_type, body))
+
+        def read_next_frame(timeout: float) -> tuple[int, bytes] | None:
+            assert sock is not None
+            return _read_control_frame(sock, timeout=timeout)
+
+        def send_audio_chunk(chunk: bytes) -> None:
+            assert sock is not None
+            sock.sendall(build_frame(MSG_AUDIO, chunk))
+
+    else:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("", args.local_udp_control_port))
+        audio_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        audio_sock.bind(("", args.local_udp_audio_port))
+        local_audio = audio_sock.getsockname()[1]
+        if local_audio != args.local_udp_audio_port:
+            print(f"UDP_AUDIO local_port={local_audio}")
+
+        def send_control_frame(msg_type: int, body: bytes = b"") -> None:
+            assert sock is not None
+            sock.sendto(build_frame(msg_type, body), control_target)
+
+        def read_next_frame(timeout: float) -> tuple[int, bytes] | None:
+            assert sock is not None
+            return _read_udp_control_frame(sock, timeout=timeout)
+
+        def send_audio_chunk(chunk: bytes) -> None:
+            assert audio_sock is not None
+            audio_sock.sendto(chunk, audio_target)
+
+    sender = AudioSender(send_audio_chunk, audio_chunks, args.repeat_audio, _frame_seconds(sender_format))
     body = build_start_body(
         call_id=call_id,
         caller_route=args.caller_route,
         caller_name=args.caller_name,
         dest_route=args.dest_route,
         dest_name=dest_name,
+        caller_tx_formats=tx_formats,
+        caller_rx_formats=rx_formats,
     )
-    sock.sendall(build_frame(MSG_START, body))
+    send_control_frame(MSG_START, body)
     print(
-        f"SENT START target={target_host!r} caller={args.caller_name!r} "
-        f"dest={dest_name!r} call_id={call_id!r}"
+        f"SENT START transport={transport} target={target_host!r} caller={args.caller_name!r} "
+        f"dest={dest_name!r} call_id={call_id!r} "
+        f"tx={[f.wire_token() for f in tx_formats]} rx={[f.wire_token() for f in rx_formats]}"
     )
     if audio_chunks:
         print(
@@ -526,7 +664,18 @@ def run_probe(args: argparse.Namespace) -> int:
     answered = False
     try:
         while time.monotonic() < deadline:
-            frame = _read_control_frame(sock, timeout=0.5)
+            if transport == "udp" and audio_sock is not None:
+                audio_sock.settimeout(0.0)
+                while True:
+                    try:
+                        data, _addr = audio_sock.recvfrom(MAX_PAYLOAD_SIZE)
+                    except (BlockingIOError, socket.timeout):
+                        break
+                    if data:
+                        rx_audio.append(data)
+                        if len(rx_audio) == 1 or len(rx_audio) % 50 == 0:
+                            print(f"AUDIO_RX chunks={len(rx_audio)} bytes={sum(len(c) for c in rx_audio)}")
+            frame = read_next_frame(timeout=0.5)
             if frame is None:
                 continue
             msg_type, payload = frame
@@ -536,10 +685,18 @@ def run_probe(args: argparse.Namespace) -> int:
                 if len(rx_audio) == 1 or len(rx_audio) % 50 == 0:
                     print(f"AUDIO_RX chunks={len(rx_audio)} bytes={sum(len(c) for c in rx_audio)}")
                 continue
-            print(f"TCP_RX {_message_name(msg_type)} len={len(payload)}{describe_payload(msg_type, payload)}")
+            print(f"{transport.upper()}_RX {_message_name(msg_type)} len={len(payload)}{describe_payload(msg_type, payload)}")
             if msg_type == MSG_PING:
-                sock.sendall(build_frame(MSG_PONG))
+                send_control_frame(MSG_PONG)
             if msg_type == MSG_ANSWER:
+                answer = protocol_mod.parse_answer_body(payload)
+                tx_format = answer["caller_to_dest_format"]
+                rx_format = answer["dest_to_caller_format"]
+                if tx_format != sender_format:
+                    sender.stop()
+                    sender_format = tx_format
+                    audio_chunks = _audio_chunks_from_args(args, sender_format)
+                    sender = AudioSender(send_audio_chunk, audio_chunks, args.repeat_audio, _frame_seconds(sender_format))
                 answered = True
                 sender.start()
                 if not args.record_wav and not audio_chunks:
@@ -554,15 +711,18 @@ def run_probe(args: argparse.Namespace) -> int:
     finally:
         sender.stop()
         try:
-            sock.sendall(build_frame(MSG_HANGUP, build_call_id_only_body(call_id)))
+            send_control_frame(MSG_HANGUP, build_call_id_only_body(call_id))
         except Exception:
             pass
-        sock.close()
+        if sock is not None:
+            sock.close()
+        if audio_sock is not None:
+            audio_sock.close()
         time.sleep(0.5)
         if collector is not None:
             collector.stop()
         if args.record_wav:
-            _write_recording(args.record_wav, rx_audio)
+            _write_recording(args.record_wav, rx_audio, rx_format)
             print(f"AUDIO_RX wrote {args.record_wav} chunks={len(rx_audio)} bytes={sum(len(c) for c in rx_audio)}")
         if audio_chunks:
             print(f"AUDIO_TX sent chunks={sender.sent_chunks} bytes={sender.sent_bytes} answered={answered}")
@@ -586,10 +746,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ha", default="192.168.1.10", help="HA host/IP for event subscription and default TCP target")
     parser.add_argument("--target", default="", help="TCP intercom target host/IP; defaults to --ha")
+    parser.add_argument("--transport", choices=("tcp", "udp"), default="tcp")
     parser.add_argument("--ha-url", default="", help="HA base URL, default http://HA:8123")
     parser.add_argument("--ha-events", choices=("auto", "on", "off"), default="auto",
                         help="Subscribe to HA intercom events. auto enables it when HA_TOKEN is set.")
     parser.add_argument("--port", type=int, default=INTERCOM_PORT)
+    parser.add_argument("--udp-audio-port", type=int, default=6054)
+    parser.add_argument("--udp-control-port", type=int, default=6055)
+    parser.add_argument("--local-udp-audio-port", type=int, default=6054)
+    parser.add_argument("--local-udp-control-port", type=int, default=0)
     parser.add_argument("--caller-name", default="Codex Fake ESP 1")
     parser.add_argument("--caller-route", default="codex-fake-1")
     parser.add_argument("--dest-name", default="")
@@ -597,13 +762,17 @@ def main() -> int:
     parser.add_argument("--call-id", default="")
     parser.add_argument("--listen-seconds", type=float, default=6.0)
     parser.add_argument("--expect", choices=("ring", "answer", "decline", "error"), default="")
+    parser.add_argument("--tx-format", action="append", default=None,
+                        help=f"Caller TX capability token, repeatable. Default: {DEFAULT_FORMAT.wire_token()}")
+    parser.add_argument("--rx-format", action="append", default=None,
+                        help=f"Caller RX capability token, repeatable. Default: {DEFAULT_FORMAT.wire_token()}")
     parser.add_argument("--send-tone", type=float, default=0.0, metavar="HZ",
                         help="Send a generated sine tone after ANSWER, e.g. 880.")
     parser.add_argument("--tone-seconds", type=float, default=3.0)
     parser.add_argument("--tone-amplitude", type=float, default=0.20)
-    parser.add_argument("--send-wav", default="", help=f"Send mono s16le {SAMPLE_RATE}Hz WAV after ANSWER.")
+    parser.add_argument("--send-wav", default="", help="Send a WAV after ANSWER; it is converted to --tx-format.")
     parser.add_argument("--repeat-audio", action="store_true", help="Loop --send-tone/--send-wav until listen timeout.")
-    parser.add_argument("--record-wav", default="", help=f"Record received AUDIO frames as mono s16le {SAMPLE_RATE}Hz WAV.")
+    parser.add_argument("--record-wav", default="", help="Record received AUDIO frames using the answered RX format.")
     parser.add_argument("--keep-ringing", action="store_true", help="Do not exit immediately after RING.")
     return run_probe(parser.parse_args())
 

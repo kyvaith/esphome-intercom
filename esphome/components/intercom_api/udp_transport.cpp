@@ -139,11 +139,21 @@ bool UdpTransport::start_audio_path() {
   }
   if (this->audio_active_.exchange(true, std::memory_order_acq_rel)) return true;
 
+  RAMAllocator<uint8_t> alloc;
+  this->audio_rx_buffer_ = alloc.allocate(MAX_AUDIO_CHUNK);
+  if (this->audio_rx_buffer_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate UDP audio receive buffer (%u bytes)", (unsigned) MAX_AUDIO_CHUNK);
+    this->audio_active_.store(false, std::memory_order_release);
+    return false;
+  }
+
   this->audio_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
   if (this->audio_socket_ < 0) {
     const int err = errno;
     ESP_LOGE(TAG, "Failed to create UDP audio socket: %s (%d: %s)",
              socket_errno_name(err), err, socket_errno_text(err));
+    alloc.deallocate(this->audio_rx_buffer_, MAX_AUDIO_CHUNK);
+    this->audio_rx_buffer_ = nullptr;
     this->audio_active_.store(false, std::memory_order_release);
     return false;
   }
@@ -162,6 +172,8 @@ bool UdpTransport::start_audio_path() {
     ESP_LOGE(TAG, "UDP audio bind on port %u failed: %s (%d: %s)",
              (unsigned) this->listen_port_, socket_errno_name(err), err, socket_errno_text(err));
     close(this->audio_socket_); this->audio_socket_ = -1;
+    alloc.deallocate(this->audio_rx_buffer_, MAX_AUDIO_CHUNK);
+    this->audio_rx_buffer_ = nullptr;
     this->audio_active_.store(false, std::memory_order_release);
     return false;
   }
@@ -172,6 +184,8 @@ bool UdpTransport::start_audio_path() {
                                            &this->recv_task_handle_, &this->recv_task_tcb_,
                                            &this->recv_task_stack_)) {
     close(this->audio_socket_); this->audio_socket_ = -1;
+    alloc.deallocate(this->audio_rx_buffer_, MAX_AUDIO_CHUNK);
+    this->audio_rx_buffer_ = nullptr;
     this->audio_active_.store(false, std::memory_order_release);
     return false;
   }
@@ -206,6 +220,11 @@ void UdpTransport::stop_audio_path() {
   if (this->audio_socket_ >= 0) {
     close(this->audio_socket_);
     this->audio_socket_ = -1;
+  }
+  if (this->audio_rx_buffer_ != nullptr) {
+    RAMAllocator<uint8_t> alloc;
+    alloc.deallocate(this->audio_rx_buffer_, MAX_AUDIO_CHUNK);
+    this->audio_rx_buffer_ = nullptr;
   }
   ESP_LOGI(TAG, "UDP audio path closed");
 }
@@ -292,6 +311,11 @@ bool UdpTransport::send_decline_to_(const struct sockaddr_in &dst,
 
 void UdpTransport::send_audio_frame(const uint8_t *pcm, size_t bytes) {
   if (!this->active_.load(std::memory_order_acquire) || this->audio_socket_ < 0) return;
+  if (bytes > UDP_SAFE_AUDIO_PAYLOAD_BYTES) {
+    LOG_W_THROTTLED("UDP audio frame too large for safe datagram payload: %u > %u bytes; dropping",
+                    (unsigned) bytes, (unsigned) UDP_SAFE_AUDIO_PAYLOAD_BYTES);
+    return;
+  }
 
   struct sockaddr_in dst;
   uint16_t port = this->remote_port_.load(std::memory_order_acquire);
@@ -309,7 +333,7 @@ void UdpTransport::send_audio_frame(const uint8_t *pcm, size_t bytes) {
 bool UdpTransport::send_control(MessageType type,
                                  const uint8_t *payload, size_t len) {
   if (!this->active_.load(std::memory_order_acquire) || this->control_socket_ < 0) return false;
-  if (len > MAX_AUDIO_CHUNK + 64) {
+  if (len > MAX_CONTROL_PAYLOAD) {
     ESP_LOGW(TAG, "UDP control payload too large (%zu), dropping", len);
     return false;
   }
@@ -319,7 +343,7 @@ bool UdpTransport::send_control(MessageType type,
   if (!this->resolve_remote_(control_port != 0 ? control_port : this->control_port_, dst)) return false;
 
   // Single contiguous buffer so the datagram arrives atomic on the peer.
-  uint8_t buf[HEADER_SIZE + MAX_AUDIO_CHUNK + 64];
+  uint8_t buf[HEADER_SIZE + MAX_CONTROL_PAYLOAD];
   MessageHeader hdr;
   hdr.type = static_cast<uint8_t>(type);
   hdr.length = static_cast<uint16_t>(len);
@@ -356,8 +380,11 @@ void UdpTransport::ctrl_task_trampoline_(void *param) {
 void UdpTransport::recv_task_() {
   ESP_LOGD(TAG, "UDP audio recv task started on port %u", (unsigned) this->listen_port_);
 
-  // One frame per datagram. 2x leaves headroom for non-default chunk sizes.
-  uint8_t rx[AUDIO_CHUNK_BYTES * 2];
+  uint8_t *const rx = this->audio_rx_buffer_;
+  if (rx == nullptr) {
+    ESP_LOGE(TAG, "UDP audio recv task has no receive buffer");
+    this->audio_active_.store(false, std::memory_order_release);
+  }
 
   while (this->running_.load(std::memory_order_acquire) &&
          this->audio_active_.load(std::memory_order_acquire)) {
@@ -371,7 +398,7 @@ void UdpTransport::recv_task_() {
 
     struct sockaddr_in src;
     socklen_t src_len = sizeof(src);
-    ssize_t n = recvfrom(this->audio_socket_, rx, sizeof(rx), 0,
+    ssize_t n = recvfrom(this->audio_socket_, rx, MAX_AUDIO_CHUNK, 0,
                          reinterpret_cast<struct sockaddr *>(&src), &src_len);
     if (n > 0) {
       if (!this->source_matches_remote_(src)) {
@@ -403,7 +430,7 @@ void UdpTransport::ctrl_task_() {
   // this port to the internet.
   ESP_LOGD(TAG, "UDP control recv task started on port %u", (unsigned) this->control_port_);
 
-  uint8_t rx[HEADER_SIZE + MAX_AUDIO_CHUNK + 64];
+  uint8_t rx[HEADER_SIZE + MAX_CONTROL_PAYLOAD];
 
   while (this->running_.load(std::memory_order_acquire)) {
     if (!wait_socket_readable(this->control_socket_, PING_INTERVAL_MS)) {

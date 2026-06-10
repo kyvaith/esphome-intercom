@@ -173,6 +173,8 @@ class IntercomTcpClient(IntercomTransport):
             caller_name=caller_name or "",
             dest_route="",
             dest_name="",
+            caller_tx_formats=self.local_tx_formats,
+            caller_rx_formats=self.local_rx_formats,
         )
         self.set_call_context(call_id, caller_name or "")
         if not await self._write_frame(MSG_START, body):
@@ -226,7 +228,11 @@ class IntercomTcpClient(IntercomTransport):
         return await self._send_answer_inner()
 
     async def _send_answer_inner(self) -> bool:
-        body = protocol.build_call_id_only_body(self._current_call_id())
+        body = protocol.build_answer_body(
+            self._current_call_id(),
+            caller_to_dest_format=self.caller_to_dest_format,
+            dest_to_caller_format=self.dest_to_caller_format,
+        )
         try:
             await asyncio.wait_for(self._write_frame(MSG_ANSWER, body), timeout=1.0)
             # Responder side: no inbound ANSWER to flip us via dispatch.

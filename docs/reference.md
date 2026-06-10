@@ -337,7 +337,7 @@ Default ports (configurable from the integration config flow):
 | Port | Default | Notes |
 |---|---|---|
 | `tcp_port` | 6054 | PBX-lite framed TCP. |
-| `udp_audio_port` | 6054 | Raw L16 PCM audio (different protocol stack from TCP, can share the number). |
+| `udp_audio_port` | 6054 | Raw negotiated PCM audio (different protocol stack from TCP, can share the number). |
 | `udp_control_port` | 6055 | UDP `MessageHeader` signaling. Must differ from `udp_audio_port`. |
 
 If `network.async_get_announce_addresses(hass)` returns empty, the integration logs a WARN: HA cannot enter the phonebook as a peer, so ESPs in `routing_mode: ha_pbx` cannot route until you configure either `network: announced_addresses:` or an `external_url`. `device_independent` peers are unaffected. A port bind failure transitions the config entry to `ConfigEntryError` instead of running half-broken.

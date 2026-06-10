@@ -103,8 +103,114 @@ enum class ErrorCode : uint8_t {
   BUSY = 0x01,
 };
 
-// Wire contract: 16 kHz mono int16, 512 samples per chunk = 32 ms.
-static constexpr uint32_t SAMPLE_RATE = 16000;
+enum class PcmFormat : uint8_t {
+  S16LE = 1,
+  S24LE = 2,
+  S24LE_IN_S32 = 3,
+  S32LE = 4,
+};
+
+struct AudioFormat {
+  uint32_t sample_rate{16000};
+  PcmFormat pcm_format{PcmFormat::S16LE};
+  uint8_t channels{1};
+  uint16_t frame_ms{32};
+
+  uint8_t container_bytes_per_sample() const {
+    switch (this->pcm_format) {
+      case PcmFormat::S16LE:
+        return 2;
+      case PcmFormat::S24LE:
+        return 3;
+      case PcmFormat::S24LE_IN_S32:
+      case PcmFormat::S32LE:
+        return 4;
+      default:
+        return 0;
+    }
+  }
+
+  size_t nominal_frame_samples() const {
+    return static_cast<size_t>((static_cast<uint64_t>(this->sample_rate) * this->frame_ms) / 1000u);
+  }
+
+  size_t nominal_frame_bytes() const {
+    return this->nominal_frame_samples() * this->channels * this->container_bytes_per_sample();
+  }
+
+  bool is_valid() const {
+    const bool valid_rate = this->sample_rate == 8000 || this->sample_rate == 12000 ||
+                            this->sample_rate == 16000 || this->sample_rate == 24000 ||
+                            this->sample_rate == 32000 || this->sample_rate == 44100 ||
+                            this->sample_rate == 48000;
+    const bool valid_channels = this->channels == 1 || this->channels == 2;
+    const bool valid_frame = this->frame_ms == 10 || this->frame_ms == 20 || this->frame_ms == 32;
+    const bool whole_frames = (static_cast<uint64_t>(this->sample_rate) * this->frame_ms) % 1000u == 0;
+    return valid_rate && valid_channels && valid_frame && whole_frames && this->container_bytes_per_sample() != 0;
+  }
+
+  bool operator==(const AudioFormat &other) const {
+    return this->sample_rate == other.sample_rate &&
+           this->pcm_format == other.pcm_format &&
+           this->channels == other.channels &&
+           this->frame_ms == other.frame_ms;
+  }
+};
+
+static constexpr AudioFormat LEGACY_AUDIO_FORMAT{};
+static constexpr size_t INTERCOM_MAX_AUDIO_FORMATS = 8;
+
+struct AudioFormatList {
+  AudioFormat formats[INTERCOM_MAX_AUDIO_FORMATS]{};
+  uint8_t count{1};
+};
+
+inline void audio_format_list_legacy(AudioFormatList *out) {
+  out->formats[0] = LEGACY_AUDIO_FORMAT;
+  out->count = 1;
+}
+
+inline bool encode_u32_le(uint8_t *out, size_t out_cap, uint32_t value) {
+  if (out_cap < 4) return false;
+  out[0] = static_cast<uint8_t>(value & 0xFF);
+  out[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+  out[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
+  out[3] = static_cast<uint8_t>((value >> 24) & 0xFF);
+  return true;
+}
+
+inline uint32_t decode_u32_le(const uint8_t *in) {
+  return static_cast<uint32_t>(in[0]) |
+         (static_cast<uint32_t>(in[1]) << 8) |
+         (static_cast<uint32_t>(in[2]) << 16) |
+         (static_cast<uint32_t>(in[3]) << 24);
+}
+
+inline size_t encode_audio_format(uint8_t *out, size_t out_cap, const AudioFormat &fmt) {
+  if (!fmt.is_valid() || out_cap < 8) return 0;
+  encode_u32_le(out, out_cap, fmt.sample_rate);
+  out[4] = static_cast<uint8_t>(fmt.pcm_format);
+  out[5] = fmt.channels;
+  out[6] = static_cast<uint8_t>(fmt.frame_ms & 0xFF);
+  out[7] = static_cast<uint8_t>((fmt.frame_ms >> 8) & 0xFF);
+  return 8;
+}
+
+inline size_t decode_audio_format(const uint8_t *in, size_t in_len, AudioFormat *out) {
+  if (in_len < 8) return 0;
+  AudioFormat fmt;
+  fmt.sample_rate = decode_u32_le(in);
+  fmt.pcm_format = static_cast<PcmFormat>(in[4]);
+  fmt.channels = in[5];
+  fmt.frame_ms = static_cast<uint16_t>(static_cast<uint16_t>(in[6]) |
+                                       (static_cast<uint16_t>(in[7]) << 8));
+  if (!fmt.is_valid()) return 0;
+  *out = fmt;
+  return 8;
+}
+
+// Legacy default: 16 kHz mono int16, 512 samples per chunk = 32 ms.
+static constexpr uint32_t SAMPLE_RATE = LEGACY_AUDIO_FORMAT.sample_rate;
 static constexpr size_t AUDIO_CHUNK_BYTES = 1024;
 
 struct __attribute__((packed)) MessageHeader {
@@ -127,8 +233,10 @@ inline MessageHeader decode_header(const uint8_t *in) {
                                    (static_cast<uint16_t>(in[2]) << 8));
   return h;
 }
-static constexpr size_t MAX_AUDIO_CHUNK = 2048;  // browser sends larger chunks
-static constexpr size_t MAX_MESSAGE_SIZE = HEADER_SIZE + MAX_AUDIO_CHUNK + 64;
+static constexpr size_t MAX_AUDIO_CHUNK = 16 * 1024;
+static constexpr size_t UDP_SAFE_AUDIO_PAYLOAD_BYTES = 1200;
+static constexpr size_t MAX_CONTROL_PAYLOAD = 512;
+static constexpr size_t MAX_MESSAGE_SIZE = HEADER_SIZE + MAX_AUDIO_CHUNK;
 
 static constexpr size_t RX_BUFFER_SIZE = 8192;   // ~256 ms / 4 browser chunks
 static constexpr size_t TX_BUFFER_SIZE = 4096;   // ~128 ms / 4 chunks @ 32 ms

@@ -142,6 +142,12 @@ class IntercomApi : public Component {
   IntercomRoutingMode routing_mode() const { return this->routing_mode_; }
   void set_use_ha_as_first_contact(bool enabled) { this->use_ha_as_first_contact_ = enabled; }
   void set_audio_debug(bool enabled) { this->audio_debug_ = enabled; }
+  void set_tx_audio_format(uint32_t sample_rate, uint8_t pcm_format, uint8_t channels, uint16_t frame_ms) {
+    this->tx_audio_format_ = AudioFormat{sample_rate, static_cast<PcmFormat>(pcm_format), channels, frame_ms};
+  }
+  void set_rx_audio_format(uint32_t sample_rate, uint8_t pcm_format, uint8_t channels, uint16_t frame_ms) {
+    this->rx_audio_format_ = AudioFormat{sample_rate, static_cast<PcmFormat>(pcm_format), channels, frame_ms};
+  }
   void set_mdns_announce_enabled(bool enabled) { this->mdns_announce_enabled_ = enabled; }
 
 #ifdef USE_INTERCOM_MDNS_DISCOVERY
@@ -364,9 +370,10 @@ class IntercomApi : public Component {
   void process_tx_chunk_(const uint8_t *audio_chunk);
 #endif
   void debug_log_pcm_level_(const char *label, const uint8_t *pcm, size_t bytes,
+                            const AudioFormat &format,
                             uint32_t &last_log_ms, uint32_t &frame_count);
 
-	  // Transport callbacks (registered in setup()).
+  // Transport callbacks (registered in setup()).
   static void transport_audio_callback_(void *ctx, const uint8_t *pcm, size_t bytes);
   static void transport_control_callback_(void *ctx, MessageType type,
                                           const uint8_t *payload, size_t len);
@@ -381,6 +388,10 @@ class IntercomApi : public Component {
     std::string caller_name;
     std::string dest_route;
     std::string dest_name;
+    AudioFormatList caller_tx_formats;
+    AudioFormatList caller_rx_formats;
+    AudioFormat caller_to_dest_format{LEGACY_AUDIO_FORMAT};
+    AudioFormat dest_to_caller_format{LEGACY_AUDIO_FORMAT};
     std::string reason;
     uint8_t error_code{0};
     std::string error_detail;
@@ -430,6 +441,7 @@ class IntercomApi : public Component {
   // transport_->send_control. False on missing transport / overflow.
   bool send_pbx_simple_(MessageType type, const std::string &call_id);
   bool send_pbx_decline_(const std::string &call_id, const std::string &reason);
+  bool send_pbx_answer_(const std::string &call_id);
   bool send_pbx_start_(const std::string &call_id,
                        const std::string &caller_route, const std::string &caller_name,
                        const std::string &dest_route, const std::string &dest_name);
@@ -544,8 +556,8 @@ class IntercomApi : public Component {
 
   // Per-iteration drain buffers, heap-allocated at setup() so the audio
   // tasks don't carry 4 KB VLAs on top of an 8 KB stack.
-  static constexpr size_t kTxAudioChunkBytes = AUDIO_CHUNK_BYTES;       // 1024
-  static constexpr size_t kMicConvertedSamples = AUDIO_CHUNK_BYTES / sizeof(int16_t);
+  size_t tx_audio_chunk_bytes_() const { return this->tx_audio_format_.nominal_frame_bytes(); }
+  size_t mic_processing_samples_() const { return this->tx_audio_chunk_bytes_() / sizeof(int16_t); }
 #endif
 #ifdef USE_INTERCOM_MDNS_DISCOVERY
   static constexpr uint32_t kMdnsDiscoveryTaskStackBytes = 6144;
@@ -567,6 +579,10 @@ class IntercomApi : public Component {
 
   std::atomic<float> volume_{1.0f};
   bool audio_debug_{false};
+  AudioFormat tx_audio_format_{LEGACY_AUDIO_FORMAT};
+  AudioFormat rx_audio_format_{LEGACY_AUDIO_FORMAT};
+  AudioFormat current_caller_to_dest_format_{LEGACY_AUDIO_FORMAT};
+  AudioFormat current_dest_to_caller_format_{LEGACY_AUDIO_FORMAT};
   uint32_t audio_debug_last_tx_log_ms_{0};
   uint32_t audio_debug_last_rx_log_ms_{0};
   uint32_t audio_debug_tx_frames_{0};

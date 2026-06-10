@@ -27,6 +27,7 @@ from .const import (
     MSG_START,
 )
 from . import protocol
+from .audio_format import UDP_SAFE_PAYLOAD_BYTES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,8 +35,8 @@ _LOGGER = logging.getLogger(__name__)
 AudioCallback = Callable[[bytes], None]
 ControlCallback = Callable[[int, bytes], None]  # (msg_type, payload)
 # Unsolicited START callback: PBX-lite body fields plus the UDP source endpoint.
-UnsolicitedCallback = Callable[[str, str, str, str, str, str, int], Awaitable[None]]
-# (caller_name, caller_route, dest_name, dest_route, call_id, host, port)
+UnsolicitedCallback = Callable[[str, str, str, str, str, str, int, list, list], Awaitable[None]]
+# (caller_name, caller_route, dest_name, dest_route, call_id, host, port, tx_formats, rx_formats)
 
 
 class _AudioProtocol(asyncio.DatagramProtocol):
@@ -285,6 +286,13 @@ class IntercomUdpSocketManager:
     def send_audio(self, host: str, data: bytes) -> bool:
         if self._audio_transport is None:
             return False
+        if len(data) > UDP_SAFE_PAYLOAD_BYTES:
+            _LOGGER.warning(
+                "UDP audio frame to %s is %d bytes, above safe payload %d; "
+                "dropping instead of relying on IP fragmentation",
+                host, len(data), UDP_SAFE_PAYLOAD_BYTES,
+            )
+            return False
         try:
             send_host = self._send_host(host)
             audio_port, _ = self.peer_ports(send_host)
@@ -370,6 +378,8 @@ class IntercomUdpSocketManager:
                 parsed["caller_name"], parsed["caller_route"],
                 parsed["dest_name"], parsed["dest_route"], parsed["call_id"],
                 addr[0], addr[1],
+                parsed.get("caller_tx_formats") or [],
+                parsed.get("caller_rx_formats") or [],
             ))
         else:
             _LOGGER.debug("UdpSocketManager: dropped 0x%02X from unregistered %s",

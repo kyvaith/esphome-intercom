@@ -16,7 +16,17 @@ from homeassistant.components import websocket_api
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant, callback
 
-from .audio_ws import AUDIO_CHUNK_BYTES, decode_audio_frame, encode_audio_frame
+from .audio_format import (
+    HA_BROWSER_RX_FORMATS,
+    HA_BROWSER_TX_FORMATS,
+    LEGACY_AUDIO_FORMAT,
+    AudioFormat,
+    choose_common_format,
+    parse_audio_format_list,
+    require_udp_safe_formats,
+)
+from .audio_pcm import convert_audio_frame
+from .audio_ws import decode_audio_frame, encode_audio_frame
 from .const import DOMAIN, HA_PEER_FALLBACK_NAME, HA_SOFTPHONE_DEVICE_ID
 from .fsm import (
     SessionState,
@@ -59,6 +69,14 @@ async def _ws_send_json(ws: web.WebSocketResponse, payload: dict[str, Any]) -> b
         return True
     except (ConnectionError, RuntimeError):
         return False
+
+
+def _session_audio_payload(session: "IntercomSession", state: str) -> dict[str, Any]:
+    return {
+        "state": state,
+        "tx_format": session.tx_format.wire_token(),
+        "rx_format": session.rx_format.wire_token(),
+    }
 
 
 def _ha_softphone_store(hass: HomeAssistant) -> dict[str, Any]:
@@ -182,6 +200,27 @@ def _has_speaker(mode: str | None) -> bool:
     return _audio_mode(mode) in {"full_duplex", "speaker_only"}
 
 
+def _device_formats(device: dict | None, key: str) -> list[AudioFormat]:
+    if not device:
+        return [LEGACY_AUDIO_FORMAT]
+    value = device.get(key)
+    if isinstance(value, str):
+        raw = value
+    else:
+        raw = ";".join(value or [])
+    try:
+        formats = parse_audio_format_list(raw)
+        if device.get("transport") == "udp":
+            require_udp_safe_formats(
+                formats,
+                context=f"{device.get('name') or device.get('device_id')} UDP {key}",
+            )
+        return formats
+    except ValueError as err:
+        _LOGGER.warning("Ignoring invalid %s on %s: %s", key, device.get("name") or device.get("device_id"), err)
+        return [LEGACY_AUDIO_FORMAT]
+
+
 async def _device_audio_mode(hass: HomeAssistant, device_id: str) -> str:
     if device_id == HA_SOFTPHONE_DEVICE_ID:
         return "full_duplex"
@@ -213,6 +252,10 @@ class IntercomSession:
         call_id: str = "",
         caller_name: str = "",
         audio_mode: str = "full_duplex",
+        local_tx_formats: list[AudioFormat] | None = None,
+        local_rx_formats: list[AudioFormat] | None = None,
+        peer_tx_formats: list[AudioFormat] | None = None,
+        peer_rx_formats: list[AudioFormat] | None = None,
     ):
         """Initialize session."""
         self.hass = hass
@@ -222,6 +265,12 @@ class IntercomSession:
         self._initial_call_id = call_id
         self._initial_caller_name = caller_name
         self.audio_mode = _audio_mode(audio_mode)
+        self.local_tx_formats = local_tx_formats or [LEGACY_AUDIO_FORMAT]
+        self.local_rx_formats = local_rx_formats or [LEGACY_AUDIO_FORMAT]
+        self.peer_tx_formats = peer_tx_formats or [LEGACY_AUDIO_FORMAT]
+        self.peer_rx_formats = peer_rx_formats or [LEGACY_AUDIO_FORMAT]
+        self.tx_format = LEGACY_AUDIO_FORMAT
+        self.rx_format = LEGACY_AUDIO_FORMAT
 
         self._transport: Optional[IntercomTransport] = transport
         self._state = SessionState.IDLE
@@ -440,12 +489,53 @@ class IntercomSession:
                     self._initial_call_id,
                     self._initial_caller_name,
                 )
+            self._transport.set_local_audio_formats([self.tx_format], [self.rx_format])
+            self._transport.set_selected_audio_formats(self.tx_format, self.rx_format)
             return self._transport
 
         transport = _build_transport_impl(self.hass, self.host, self.transport_type, callbacks)
         if self._initial_call_id:
             transport.set_call_context(self._initial_call_id, self._initial_caller_name)
+        transport.set_local_audio_formats([self.tx_format], [self.rx_format])
+        transport.set_selected_audio_formats(self.tx_format, self.rx_format)
         return transport
+
+    def _negotiate_outgoing_formats(self) -> bool:
+        tx = choose_common_format(self.peer_rx_formats, self.local_tx_formats)
+        rx = choose_common_format(self.peer_tx_formats, self.local_rx_formats)
+        if tx is None or rx is None:
+            _LOGGER.error(
+                "No compatible audio format for %s: local_tx=%s peer_rx=%s peer_tx=%s local_rx=%s",
+                self.device_id,
+                [fmt.wire_token() for fmt in self.local_tx_formats],
+                [fmt.wire_token() for fmt in self.peer_rx_formats],
+                [fmt.wire_token() for fmt in self.peer_tx_formats],
+                [fmt.wire_token() for fmt in self.local_rx_formats],
+            )
+            return False
+        self.tx_format = tx
+        self.rx_format = rx
+        return True
+
+    def _negotiate_incoming_formats(self) -> bool:
+        if self._transport is None:
+            return False
+        caller_to_dest = choose_common_format(self._transport.peer_tx_formats, self.local_rx_formats)
+        dest_to_caller = choose_common_format(self._transport.peer_rx_formats, self.local_tx_formats)
+        if caller_to_dest is None or dest_to_caller is None:
+            _LOGGER.error(
+                "No compatible inbound audio format for %s: peer_tx=%s local_rx=%s local_tx=%s peer_rx=%s",
+                self.device_id,
+                [fmt.wire_token() for fmt in self._transport.peer_tx_formats],
+                [fmt.wire_token() for fmt in self.local_rx_formats],
+                [fmt.wire_token() for fmt in self.local_tx_formats],
+                [fmt.wire_token() for fmt in self._transport.peer_rx_formats],
+            )
+            return False
+        self.rx_format = caller_to_dest
+        self.tx_format = dest_to_caller
+        self._transport.set_selected_audio_formats(caller_to_dest, dest_to_caller)
+        return True
 
     async def start(self) -> str:
         """Start the session. Returns "streaming" / "ringing" / "error"."""
@@ -460,6 +550,9 @@ class IntercomSession:
                 self._tx_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+        if not self._negotiate_outgoing_formats():
+            self._transition(SessionState.ENDED, event="error", reason="incompatible_audio_format")
+            return "error"
 
         self._transport = self._create_transport()
 
@@ -533,6 +626,9 @@ class IntercomSession:
         if self._state is not SessionState.RINGING_IN or not self._transport:
             _LOGGER.warning("answer() refused: state=%s transport=%s", self._state, bool(self._transport))
             return False
+        if not self._negotiate_incoming_formats():
+            self._transition(SessionState.ENDED, event="error", reason="incompatible_audio_format")
+            return False
 
         result = await self._transport.send_answer()
         if result:
@@ -587,6 +683,16 @@ class IntercomSession:
         """Non-blocking enqueue; drops oldest on full to keep latency bounded."""
         if not self.is_active or not _has_speaker(self.audio_mode):
             return
+        expected = self.tx_format.nominal_frame_bytes
+        if len(data) != expected:
+            _LOGGER.warning(
+                "Dropping browser audio for %s: got %d bytes, expected %d for %s",
+                self.device_id,
+                len(data),
+                expected,
+                self.tx_format.wire_token(),
+            )
+            return
         self._last_browser_audio = time.monotonic()
         _put_latest(self._tx_queue, data)
 
@@ -614,6 +720,10 @@ class BridgeSession:
         source_call_id: str = "",
         source_audio_mode: str = "full_duplex",
         dest_audio_mode: str = "full_duplex",
+        source_tx_formats: list[AudioFormat] | None = None,
+        source_rx_formats: list[AudioFormat] | None = None,
+        dest_tx_formats: list[AudioFormat] | None = None,
+        dest_rx_formats: list[AudioFormat] | None = None,
     ):
         """`source_transport` is set when the TCP listener already
         accepted the source leg; otherwise start() builds it."""
@@ -630,6 +740,14 @@ class BridgeSession:
         self.source_call_id = source_call_id or bridge_id
         self.source_audio_mode = _audio_mode(source_audio_mode)
         self.dest_audio_mode = _audio_mode(dest_audio_mode)
+        self.source_tx_formats = source_tx_formats or [LEGACY_AUDIO_FORMAT]
+        self.source_rx_formats = source_rx_formats or [LEGACY_AUDIO_FORMAT]
+        self.dest_tx_formats = dest_tx_formats or [LEGACY_AUDIO_FORMAT]
+        self.dest_rx_formats = dest_rx_formats or [LEGACY_AUDIO_FORMAT]
+        self.source_to_ha_format = LEGACY_AUDIO_FORMAT
+        self.ha_to_source_format = LEGACY_AUDIO_FORMAT
+        self.dest_to_ha_format = LEGACY_AUDIO_FORMAT
+        self.ha_to_dest_format = LEGACY_AUDIO_FORMAT
 
         self._source_client: Optional[IntercomTransport] = source_transport
         self._dest_client: Optional[IntercomTransport] = None
@@ -653,6 +771,35 @@ class BridgeSession:
 
     def _push_audio(self, queue: asyncio.Queue, data: bytes) -> None:
         _put_latest(queue, data)
+
+    def _pick_bridge_formats(self) -> None:
+        source_tx = self._source_client.peer_tx_formats if self._source_client else self.source_tx_formats
+        source_rx = self._source_client.peer_rx_formats if self._source_client else self.source_rx_formats
+        s2d_common = choose_common_format(source_tx, self.dest_rx_formats)
+        d2s_common = choose_common_format(self.dest_tx_formats, source_rx)
+
+        self.source_to_ha_format = s2d_common or source_tx[0]
+        self.ha_to_dest_format = s2d_common or self.dest_rx_formats[0]
+        self.dest_to_ha_format = d2s_common or self.dest_tx_formats[0]
+        self.ha_to_source_format = d2s_common or source_rx[0]
+
+        if self._source_client is not None:
+            self._source_client.set_selected_audio_formats(
+                self.source_to_ha_format,
+                self.ha_to_source_format,
+            )
+        if self._dest_client is not None:
+            self._dest_client.set_local_audio_formats(
+                [self.ha_to_dest_format],
+                [self.dest_to_ha_format],
+            )
+
+    def _convert_bridge_audio(self, data: bytes, src: AudioFormat, dst: AudioFormat, direction: str) -> bytes | None:
+        try:
+            return convert_audio_frame(data, src, dst)
+        except ValueError as err:
+            _LOGGER.warning("Bridge %s dropped invalid %s audio frame: %s", self.bridge_id, direction, err)
+            return None
 
     async def _notify_source_answered(self) -> None:
         """Forward ANSWER to the source so it commits to STREAMING
@@ -753,11 +900,25 @@ class BridgeSession:
 
     def _source_audio(self, data: bytes) -> None:
         if self._active and _has_mic(self.source_audio_mode) and _has_speaker(self.dest_audio_mode):
-            self._push_audio(self._q_source_to_dest, data)
+            converted = self._convert_bridge_audio(
+                data,
+                self.source_to_ha_format,
+                self.ha_to_dest_format,
+                "source_to_dest",
+            )
+            if converted is not None:
+                self._push_audio(self._q_source_to_dest, converted)
 
     def _dest_audio(self, data: bytes) -> None:
         if self._active and _has_mic(self.dest_audio_mode) and _has_speaker(self.source_audio_mode):
-            self._push_audio(self._q_dest_to_source, data)
+            converted = self._convert_bridge_audio(
+                data,
+                self.dest_to_ha_format,
+                self.ha_to_source_format,
+                "dest_to_source",
+            )
+            if converted is not None:
+                self._push_audio(self._q_dest_to_source, converted)
 
     def _source_disconnected(self) -> None:
         _LOGGER.debug("Bridge source disconnected: %s", self.bridge_id)
@@ -914,6 +1075,7 @@ class BridgeSession:
         self._dest_client = self._build_dest_client()
         source_client = self._source_client
         dest_client = self._dest_client
+        self._pick_bridge_formats()
 
         self._fire_state_event("calling")
 
@@ -1168,6 +1330,8 @@ class BridgeSession:
         new_dest_name: str,
         new_dest_transport_type: str | None = None,
         new_dest_audio_mode: str = "full_duplex",
+        new_dest_tx_formats: list[AudioFormat] | None = None,
+        new_dest_rx_formats: list[AudioFormat] | None = None,
     ) -> str:
         """Replace the dest leg in place. Returns "connected"/"ringing"/"error"."""
         async with self._stop_lock:
@@ -1196,6 +1360,8 @@ class BridgeSession:
             self.dest_name = new_dest_name
             self.dest_transport_type = new_dest_transport_type or self.dest_transport_type
             self.dest_audio_mode = _audio_mode(new_dest_audio_mode)
+            self.dest_tx_formats = new_dest_tx_formats or self.dest_tx_formats
+            self.dest_rx_formats = new_dest_rx_formats or self.dest_rx_formats
 
             self._dest_client = _build_transport_impl(
                 self.hass,
@@ -1203,6 +1369,7 @@ class BridgeSession:
                 self.dest_transport_type,
                 self._forward_dest_callbacks(),
             )
+            self._pick_bridge_formats()
 
             # 6. Connect and start stream to new dest
             if not await self._dest_client.connect():
@@ -1300,7 +1467,7 @@ class IntercomAudioWebSocketView(HomeAssistantView):
         session: IntercomSession | None = _sessions.get(device_id)
         if session is not None:
             session.bind_audio_ws(ws)
-            await _ws_send_json(ws, {"state": "streaming" if session.is_active else "ringing"})
+            await _ws_send_json(ws, _session_audio_payload(session, "streaming" if session.is_active else "ringing"))
 
         try:
             async for msg in ws:
@@ -1340,6 +1507,10 @@ class IntercomAudioWebSocketView(HomeAssistantView):
             if not device_id or not host:
                 await _ws_send_json(ws, {"error": "missing start target"})
                 return None
+            target = next(
+                (d for d in await _get_intercom_devices(hass) if d.get("device_id") == device_id),
+                None,
+            )
             if device_id in _sessions:
                 await _sessions.pop(device_id).stop()
             session = IntercomSession(
@@ -1347,13 +1518,17 @@ class IntercomAudioWebSocketView(HomeAssistantView):
                 device_id=device_id,
                 host=host,
                 transport_type=configured_transport_type(hass, host),
-                audio_mode=await _device_audio_mode(hass, device_id),
+                audio_mode=(target or {}).get("audio_mode") or await _device_audio_mode(hass, device_id),
+                local_tx_formats=list(HA_BROWSER_TX_FORMATS),
+                local_rx_formats=list(HA_BROWSER_RX_FORMATS),
+                peer_tx_formats=_device_formats(target, "tx_formats"),
+                peer_rx_formats=_device_formats(target, "rx_formats"),
             )
             result = await session.start()
             if result in ("streaming", "ringing"):
                 _sessions[device_id] = session
                 session.bind_audio_ws(ws)
-                if not await _ws_send_json(ws, {"state": result}):
+                if not await _ws_send_json(ws, _session_audio_payload(session, result)):
                     await session.unbind_audio_ws(ws)
                     return None
                 return session
@@ -1378,6 +1553,10 @@ class IntercomAudioWebSocketView(HomeAssistantView):
                 host=target["host"],
                 transport_type=configured_transport_type(hass, target["host"]),
                 audio_mode=target.get("audio_mode", "full_duplex"),
+                local_tx_formats=list(HA_BROWSER_TX_FORMATS),
+                local_rx_formats=list(HA_BROWSER_RX_FORMATS),
+                peer_tx_formats=_device_formats(target, "tx_formats"),
+                peer_rx_formats=_device_formats(target, "rx_formats"),
             )
             result = await session.start()
             if result in ("streaming", "ringing"):
@@ -1390,7 +1569,7 @@ class IntercomAudioWebSocketView(HomeAssistantView):
                     target_device_id=target_device_id,
                 )
                 session.bind_audio_ws(ws)
-                if not await _ws_send_json(ws, {"state": result}):
+                if not await _ws_send_json(ws, _session_audio_payload(session, result)):
                     await session.unbind_audio_ws(ws)
                     return None
                 return session
@@ -1400,7 +1579,7 @@ class IntercomAudioWebSocketView(HomeAssistantView):
         if kind == "answer":
             session = _sessions.get(device_id)
             ok = await session.answer() if session is not None else False
-            await _ws_send_json(ws, {"state": "streaming" if ok else "error"})
+            await _ws_send_json(ws, _session_audio_payload(session, "streaming") if ok else {"state": "error"})
             return session if ok else None
 
         if kind == "answer_esp_call":
@@ -1408,7 +1587,7 @@ class IntercomAudioWebSocketView(HomeAssistantView):
             existing = _sessions.get(device_id)
             if existing is not None and existing.is_ringing:
                 ok = await existing.answer()
-                await _ws_send_json(ws, {"state": "streaming" if ok else "error"})
+                await _ws_send_json(ws, _session_audio_payload(existing, "streaming") if ok else {"state": "error"})
                 return existing if ok else None
             if device_id in _sessions:
                 await _sessions.pop(device_id).stop()
@@ -1423,7 +1602,7 @@ class IntercomAudioWebSocketView(HomeAssistantView):
             if result == "streaming":
                 _sessions[device_id] = session
                 session.bind_audio_ws(ws)
-                if not await _ws_send_json(ws, {"state": "streaming"}):
+                if not await _ws_send_json(ws, _session_audio_payload(session, "streaming")):
                     await session.unbind_audio_ws(ws)
                     return None
                 return session
@@ -1475,6 +1654,10 @@ async def websocket_start(
     _LOGGER.debug("Start request: device=%s host=%s", device_id, host)
 
     try:
+        target = next(
+            (d for d in await _get_intercom_devices(hass) if d.get("device_id") == device_id),
+            None,
+        )
         # Stop existing session if any
         if device_id in _sessions:
             old_session = _sessions.pop(device_id)
@@ -1485,18 +1668,22 @@ async def websocket_start(
             device_id=device_id,
             host=host,
             transport_type=configured_transport_type(hass, host),
-            audio_mode=await _device_audio_mode(hass, device_id),
+            audio_mode=(target or {}).get("audio_mode") or await _device_audio_mode(hass, device_id),
+            local_tx_formats=list(HA_BROWSER_TX_FORMATS),
+            local_rx_formats=list(HA_BROWSER_RX_FORMATS),
+            peer_tx_formats=_device_formats(target, "tx_formats"),
+            peer_rx_formats=_device_formats(target, "rx_formats"),
         )
         result = await session.start()
 
         if result == "streaming":
             _sessions[device_id] = session
             _LOGGER.debug("Session started (streaming): %s", device_id)
-            connection.send_result(msg_id, {"success": True, "state": "streaming"})
+            connection.send_result(msg_id, {"success": True, **_session_audio_payload(session, "streaming")})
         elif result == "ringing":
             _sessions[device_id] = session
             _LOGGER.debug("Session started (ringing): %s", device_id)
-            connection.send_result(msg_id, {"success": True, "state": "ringing"})
+            connection.send_result(msg_id, {"success": True, **_session_audio_payload(session, "ringing")})
         else:
             _LOGGER.error("Session failed: %s", device_id)
             connection.send_error(msg_id, "connection_failed", f"Failed to connect to {host}")
@@ -1539,6 +1726,10 @@ async def websocket_ha_softphone_start(
         host=target["host"],
         transport_type=configured_transport_type(hass, target["host"]),
         audio_mode=target.get("audio_mode", "full_duplex"),
+        local_tx_formats=list(HA_BROWSER_TX_FORMATS),
+        local_rx_formats=list(HA_BROWSER_RX_FORMATS),
+        peer_tx_formats=_device_formats(target, "tx_formats"),
+        peer_rx_formats=_device_formats(target, "rx_formats"),
     )
     result = await session.start()
     if result in ("streaming", "ringing"):
@@ -1550,7 +1741,7 @@ async def websocket_ha_softphone_start(
             peer_name=target.get("name") or "",
             target_device_id=target_device_id,
         )
-        connection.send_result(msg_id, {"success": True, "state": result})
+        connection.send_result(msg_id, {"success": True, **_session_audio_payload(session, result)})
         return
 
     connection.send_error(msg_id, "connection_failed", f"Failed to connect to {target.get('name') or target_device_id}")
@@ -1773,6 +1964,8 @@ async def _stop_device_sessions(
         stopped = True
 
     if not stopped and force_esp and hass is not None:
+        if device_id == HA_SOFTPHONE_DEVICE_ID:
+            return False
         stopped = await _force_esp_stop_from_state(hass, device_id)
 
     return stopped
@@ -1821,7 +2014,7 @@ async def websocket_answer(
     if session:
         result = await session.answer()
         if result:
-            connection.send_result(msg_id, {"success": True})
+            connection.send_result(msg_id, {"success": True, **_session_audio_payload(session, "streaming")})
         else:
             connection.send_error(msg_id, "error", "Failed to send answer")
         return
@@ -1877,6 +2070,10 @@ async def websocket_answer_esp_call(
     _LOGGER.debug("Answer ESP call: device=%s host=%s", device_id, host)
 
     try:
+        target = next(
+            (d for d in await _get_intercom_devices(hass) if d.get("device_id") == device_id),
+            None,
+        )
         # Reuse any ringing session created by the unsolicited handler;
         # rebuilding the transport would race the consumer registry and
         # drop the inbound PONG.
@@ -1886,7 +2083,7 @@ async def websocket_answer_esp_call(
             ok = await existing.answer()
             if ok:
                 _LOGGER.info("Answered ESP call via existing ringing session: %s", device_id)
-                connection.send_result(msg_id, {"success": True, "state": "streaming"})
+                connection.send_result(msg_id, {"success": True, **_session_audio_payload(existing, "streaming")})
             else:
                 _LOGGER.error("Failed to answer (existing ringing session): %s", device_id)
                 connection.send_error(msg_id, "connection_failed", f"Failed to connect to {host}")
@@ -1902,14 +2099,18 @@ async def websocket_answer_esp_call(
             device_id=device_id,
             host=host,
             transport_type=configured_transport_type(hass, host),
-            audio_mode=await _device_audio_mode(hass, device_id),
+            audio_mode=(target or {}).get("audio_mode") or await _device_audio_mode(hass, device_id),
+            local_tx_formats=list(HA_BROWSER_TX_FORMATS),
+            local_rx_formats=list(HA_BROWSER_RX_FORMATS),
+            peer_tx_formats=_device_formats(target, "tx_formats"),
+            peer_rx_formats=_device_formats(target, "rx_formats"),
         )
         result = await session.answer_esp_call()
 
         if result == "streaming":
             _sessions[device_id] = session
             _LOGGER.info("Answered ESP call (streaming): %s", device_id)
-            connection.send_result(msg_id, {"success": True, "state": "streaming"})
+            connection.send_result(msg_id, {"success": True, **_session_audio_payload(session, "streaming")})
         else:
             _LOGGER.error("Failed to answer ESP call: %s", device_id)
             connection.send_error(msg_id, "connection_failed", f"Failed to connect to {host}")
@@ -1965,6 +2166,8 @@ def _ha_softphone_device(hass: HomeAssistant) -> dict[str, Any]:
         "host": "",
         "transport": "ha",
         "audio_mode": "full_duplex",
+        "tx_formats": [fmt.wire_token() for fmt in HA_BROWSER_TX_FORMATS],
+        "rx_formats": [fmt.wire_token() for fmt in HA_BROWSER_RX_FORMATS],
         "esphome_id": "",
         "entities": {},
         "softphone": True,

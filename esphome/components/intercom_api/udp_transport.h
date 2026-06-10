@@ -19,8 +19,10 @@ namespace intercom_api {
 
 /// Dual-socket UDP transport.
 ///
-/// Audio socket (listen_port, default 6054): raw PCM s16le 16 kHz mono,
-/// one frame per datagram, no header (go2rtc-compatible).
+/// Audio socket (listen_port, default 6054): negotiated raw PCM, one
+/// frame per datagram, no header. Config validation rejects frame sizes
+/// above the safe UDP payload bound so lwIP/IP fragmentation is not part
+/// of the intercom contract.
 /// Control socket (control_port, default 6055): MessageHeader-framed
 /// signaling on a separate port so the audio path stays zero-copy and
 /// go2rtc interop isn't broken by header bytes.
@@ -85,6 +87,7 @@ class UdpTransport : public IntercomTransport {
   std::atomic<uint16_t> remote_control_port_{0};
 
   int audio_socket_{-1};
+  uint8_t *audio_rx_buffer_{nullptr};
   int control_socket_{-1};
 	  TaskHandle_t recv_task_handle_{nullptr};
   StaticTask_t recv_task_tcb_{};

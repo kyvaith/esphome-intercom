@@ -28,6 +28,8 @@ UnsolicitedTcpCallback = Callable[[
     str,          # call_id
     str,          # host (peer IP)
     IntercomTcpClient,  # adopted transport, already connected
+    list,         # caller_tx_formats
+    list,         # caller_rx_formats
 ], Awaitable[None]]
 
 
@@ -175,6 +177,8 @@ class IntercomTcpSocketManager:
             parsed.get("call_id") or "",
             parsed.get("caller_name") or "",
         )
+        transport.peer_tx_formats = parsed.get("caller_tx_formats") or transport.peer_tx_formats
+        transport.peer_rx_formats = parsed.get("caller_rx_formats") or transport.peer_rx_formats
         _LOGGER.debug(
             "[TCP listener] adopted socket from %s as transport#%d "
             "(caller=%s call_id=%s)",
@@ -200,6 +204,8 @@ class IntercomTcpSocketManager:
                 parsed["call_id"],
                 host,
                 transport,
+                parsed.get("caller_tx_formats") or [],
+                parsed.get("caller_rx_formats") or [],
             )
         except Exception:
             _LOGGER.exception(
