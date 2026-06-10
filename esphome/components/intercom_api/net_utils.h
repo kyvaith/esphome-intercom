@@ -20,7 +20,7 @@ static inline bool wait_socket_readable(int socket, uint32_t timeout_ms) {
   FD_ZERO(&fds);
   FD_SET(socket, &fds);
   timeval tv = make_timeval_ms(timeout_ms);
-  int ret = select(socket + 1, &fds, nullptr, nullptr, &tv);
+  int ret = ::select(socket + 1, &fds, nullptr, nullptr, &tv);
   return ret > 0 && FD_ISSET(socket, &fds);
 }
 
@@ -30,7 +30,7 @@ static inline bool wait_socket_writable(int socket, uint32_t timeout_ms) {
   FD_ZERO(&fds);
   FD_SET(socket, &fds);
   timeval tv = make_timeval_ms(timeout_ms);
-  int ret = select(socket + 1, nullptr, &fds, nullptr, &tv);
+  int ret = ::select(socket + 1, nullptr, &fds, nullptr, &tv);
   return ret > 0 && FD_ISSET(socket, &fds);
 }
 

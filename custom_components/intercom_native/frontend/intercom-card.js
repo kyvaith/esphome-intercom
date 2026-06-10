@@ -1,5 +1,3 @@
-import { intercomEngine } from "./intercom-engine.js";
-
 /**
  * Intercom Card v2.0.0 - Pure mirror of ESP state
  *
@@ -13,14 +11,16 @@ import { intercomEngine } from "./intercom-engine.js";
  * - Streaming  -> Show "In Call [peer]" + Hangup
  */
 
-const INTERCOM_CARD_VERSION = (() => {
+const INTERCOM_MODULE_VERSION = (() => {
   try {
     const raw = new URL(import.meta.url).searchParams.get("v") || "";
-    return raw.split("-")[0] || "dev";
+    return raw || "dev";
   } catch (_) {
     return "dev";
   }
 })();
+const INTERCOM_CARD_VERSION = INTERCOM_MODULE_VERSION.split("-")[0] || "dev";
+const { intercomEngine } = await import(`./intercom-engine.js?v=${encodeURIComponent(INTERCOM_MODULE_VERSION)}`);
 const HA_SOFTPHONE_DEVICE_ID = "__intercom_native_ha_softphone__";
 
 // Lazy gate for verbose logs. Errors and warnings always emit.
@@ -120,15 +120,8 @@ class IntercomCard extends HTMLElement {
   }
 
   async _subscribeBusEvents() {
-    if (!this._hass?.connection || this._unsubCallEvents) return;
-    try {
-      this._unsubCallEvents = await this._hass.connection.subscribeEvents(
-        (e) => this._onCallEvent(e),
-        "intercom_native.call_event",
-      );
-    } catch (err) {
-      console.warn("intercom-card: failed to subscribe intercom_native.call_event", err);
-    }
+    if (this._unsubCallEvents) return;
+    this._unsubCallEvents = intercomEngine.subscribeCallEvents((e) => this._onCallEvent(e));
   }
 
   _eventConcernsThisCard(payload) {

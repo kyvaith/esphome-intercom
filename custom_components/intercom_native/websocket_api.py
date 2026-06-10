@@ -19,7 +19,9 @@ from homeassistant.core import HomeAssistant, callback
 from .audio_ws import AUDIO_CHUNK_BYTES, decode_audio_frame, encode_audio_frame
 from .const import DOMAIN, HA_PEER_FALLBACK_NAME, HA_SOFTPHONE_DEVICE_ID
 from .fsm import (
+    SessionState,
     TerminalReason,
+    can_transition,
     localize_bridge_reason,
     terminal_reason_for_decline,
     terminal_state_for_decline,
@@ -47,6 +49,16 @@ _bridges: Dict[str, "BridgeSession"] = {}
 CALL_EVENT = "intercom_native.call_event"
 WS_AUDIO_IDLE_TIMEOUT = 5.0
 WS_AUDIO_WATCHDOG_INTERVAL = 1.0
+
+
+async def _ws_send_json(ws: web.WebSocketResponse, payload: dict[str, Any]) -> bool:
+    if ws.closed:
+        return False
+    try:
+        await ws.send_str(json.dumps(payload))
+        return True
+    except (ConnectionError, RuntimeError):
+        return False
 
 
 def _ha_softphone_store(hass: HomeAssistant) -> dict[str, Any]:
@@ -212,29 +224,78 @@ class IntercomSession:
         self.audio_mode = _audio_mode(audio_mode)
 
         self._transport: Optional[IntercomTransport] = transport
-        self._active = False
-        self._ringing = False  # ESP is ringing, waiting for local answer
+        self._state = SessionState.IDLE
         self._tx_queue: asyncio.Queue = asyncio.Queue(maxsize=AUDIO_QUEUE_SIZE)
         self._tx_task: Optional[asyncio.Task] = None
         self._cleanup_scheduled = False
-        self._terminal_fired = False
         self._audio_ws: web.WebSocketResponse | None = None
         self._audio_ws_task: asyncio.Task | None = None
         self._last_browser_audio = time.monotonic()
 
     @property
+    def state(self) -> SessionState:
+        return self._state
+
+    @property
     def is_ringing(self) -> bool:
-        return self._ringing
+        return self._state in (SessionState.RINGING_IN, SessionState.RINGING_OUT)
 
     @property
     def is_active(self) -> bool:
-        return self._active
+        return self._state is SessionState.STREAMING
+
+    def _transition(
+        self,
+        target: SessionState,
+        *,
+        event: str | bool | None = None,
+        **extra: Any,
+    ) -> bool:
+        current = self._state
+        if not can_transition(current, target):
+            _LOGGER.debug("Session %s ignored transition %s -> %s", self.device_id, current, target)
+            return False
+        self._state = target
+
+        if target is SessionState.STREAMING and _has_speaker(self.audio_mode):
+            if self._tx_task is None or self._tx_task.done():
+                self._tx_task = self.hass.async_create_task(self._tx_sender())
+
+        if event is False:
+            return True
+        wire = str(event) if event else ""
+        if not wire:
+            return True
+
+        payload = {"device_id": self.device_id, "state": wire}
+        payload.update(extra)
+        _fire_call_event(self.hass, payload, "session")
+
+        if _ha_softphone_session_device_id(self.hass) == self.device_id:
+            if target is SessionState.ENDED:
+                _set_ha_softphone_call_state(
+                    self.hass,
+                    wire,
+                    reason=extra.get("reason"),
+                    origin=extra.get("origin"),
+                    code=extra.get("code"),
+                )
+            elif target is SessionState.STREAMING:
+                peer = self._initial_caller_name or ""
+                _set_ha_softphone_call_state(
+                    self.hass,
+                    "streaming",
+                    session_device_id=self.device_id,
+                    caller=peer,
+                    peer_name=peer,
+                )
+        return True
 
     # --- Callbacks for transport (shared by start() and answer_esp_call()) ---
 
     def _on_audio(self, data: bytes) -> None:
         """Handle audio from ESP - push to the bound browser audio socket."""
-        if not self._active or not _has_mic(self.audio_mode):
+        if not self.is_active or not _has_mic(self.audio_mode):
             return
         if self._audio_ws is None or self._audio_ws.closed:
             return
@@ -249,6 +310,9 @@ class IntercomSession:
 
     def bind_audio_ws(self, ws: web.WebSocketResponse) -> None:
         old_ws = self._audio_ws
+        if old_ws is ws:
+            self._last_browser_audio = time.monotonic()
+            return
         if old_ws is not None and not old_ws.closed:
             self.hass.async_create_task(old_ws.close())
         self._audio_ws = ws
@@ -267,7 +331,7 @@ class IntercomSession:
 
     async def _audio_watchdog(self) -> None:
         try:
-            while self._active:
+            while self.is_active:
                 await asyncio.sleep(WS_AUDIO_WATCHDOG_INTERVAL)
                 ws = self._audio_ws
                 if ws is None or ws.closed:
@@ -279,27 +343,10 @@ class IntercomSession:
         except asyncio.CancelledError:
             pass
 
-    def _fire_terminal_state(self, state: str, **extra: Any) -> None:
-        if self._terminal_fired:
-            return
-        self._terminal_fired = True
-        payload = {"device_id": self.device_id, "state": state}
-        payload.update(extra)
-        _fire_call_event(self.hass, payload, "session")
-        if _ha_softphone_session_device_id(self.hass) == self.device_id:
-            _set_ha_softphone_call_state(
-                self.hass,
-                state,
-                reason=extra.get("reason"),
-                origin=extra.get("origin"),
-                code=extra.get("code"),
-            )
-
     def _on_disconnected(self) -> None:
-        self._active = False
-        self._ringing = False
-        self._fire_terminal_state(
-            "disconnected",
+        self._transition(
+            SessionState.ENDED,
+            event="disconnected",
             reason=TerminalReason.REMOTE_DEVICE_LOST.value,
         )
         # Mirror STOP/DECLINE/ERROR teardown so a raw socket death
@@ -307,45 +354,25 @@ class IntercomSession:
         self._schedule_remote_cleanup(TerminalReason.REMOTE_DEVICE_LOST.value)
 
     def _on_ringing(self) -> None:
-        """ESP is ringing, waiting for local answer."""
-        self._ringing = True
-        _fire_call_event(self.hass, {"device_id": self.device_id, "state": "ringing"}, "session")
+        """ESP is ringing on an outgoing HA call."""
+        self._transition(SessionState.RINGING_OUT, event="ringing")
 
     def _on_answered(self) -> None:
         """ESP answered the call, streaming started."""
-        self._ringing = False
-        was_active = self._active
-        self._active = True
-        # Guard: start() and answer_esp_call() can both reach here; without
-        # the was_active check we'd leak a TX task per re-fire.
-        if _has_speaker(self.audio_mode) and not was_active and (self._tx_task is None or self._tx_task.done()):
-            self._tx_task = self.hass.async_create_task(self._tx_sender())
-        _fire_call_event(self.hass, {"device_id": self.device_id, "state": "streaming"}, "session")
-        if _ha_softphone_session_device_id(self.hass) == self.device_id:
-            peer = self._initial_caller_name or ""
-            _set_ha_softphone_call_state(
-                self.hass,
-                "streaming",
-                session_device_id=self.device_id,
-                caller=peer,
-                peer_name=peer,
-            )
+        self._transition(SessionState.STREAMING, event="streaming")
 
     def _on_stop_received(self) -> None:
         """ESP sent HANGUP from its side."""
         _LOGGER.info("Session received HANGUP from ESP: %s", self.device_id)
-        self._active = False
-        self._ringing = False
-        self._fire_terminal_state("idle", reason=TerminalReason.REMOTE_HANGUP.value)
+        self._transition(SessionState.ENDED, event="idle", reason=TerminalReason.REMOTE_HANGUP.value)
         self._schedule_remote_cleanup("HANGUP_inbound")
 
     def _on_decline_received(self, reason: str) -> None:
         """ESP sent DECLINE(reason)."""
         _LOGGER.info("Session received DECLINE from ESP (%s): %s", reason, self.device_id)
-        self._active = False
-        self._ringing = False
-        self._fire_terminal_state(
-            terminal_state_for_decline(reason),
+        self._transition(
+            SessionState.ENDED,
+            event=terminal_state_for_decline(reason),
             reason=terminal_reason_for_decline(reason),
         )
         self._schedule_remote_cleanup("DECLINE_inbound")
@@ -354,9 +381,7 @@ class IntercomSession:
         """ESP sent ERROR (technical fault)."""
         _LOGGER.info("Session received ERROR from ESP (code=%d detail=%s): %s",
                      code, detail or "(none)", self.device_id)
-        self._active = False
-        self._ringing = False
-        self._fire_terminal_state("error", code=code, reason=detail or str(code))
+        self._transition(SessionState.ENDED, event="error", code=code, reason=detail or str(code))
         self._schedule_remote_cleanup("ERROR_inbound")
 
     def _schedule_remote_cleanup(self, cause: str) -> None:
@@ -422,8 +447,11 @@ class IntercomSession:
 
     async def start(self) -> str:
         """Start the session. Returns "streaming" / "ringing" / "error"."""
-        if self._active:
+        if self._state is SessionState.STREAMING:
             return "streaming"
+        if self._state is not SessionState.IDLE:
+            _LOGGER.warning("Session %s start refused in state %s", self.device_id, self._state)
+            return "error"
 
         while not self._tx_queue.empty():
             try:
@@ -434,23 +462,24 @@ class IntercomSession:
         self._transport = self._create_transport()
 
         if not await self._transport.connect():
+            self._transition(SessionState.ENDED, event=False)
             return "error"
 
-        _fire_call_event(self.hass, {"device_id": self.device_id, "state": "calling"}, "session")
+        self._transition(SessionState.CONNECTING, event="calling")
 
         caller_name = (self.hass.config.location_name or "").strip() or HA_PEER_FALLBACK_NAME
         result = await self._transport.start_stream(caller_name=caller_name)
 
         if result == "streaming":
-            self._active = True
-            if _has_speaker(self.audio_mode) and (self._tx_task is None or self._tx_task.done()):
-                self._tx_task = self.hass.async_create_task(self._tx_sender())
+            self._transition(SessionState.STREAMING, event="streaming")
             return "streaming"
         elif result == "ringing":
-            # TX is started later by _on_answered.
-            self._ringing = True
+            # The RING wire event is fired by _on_ringing when the transport
+            # delivers it; the command response carries the immediate result.
+            self._transition(SessionState.RINGING_OUT, event=False)
             return "ringing"
         else:
+            self._transition(SessionState.ENDED, event=False)
             await self._transport.disconnect()
             return "error"
 
@@ -458,19 +487,19 @@ class IntercomSession:
         """Stop the session. send_signaling=False = ESP already terminated:
         the matching _on_*_received already fired the reason event, stay
         silent here so the card keeps that reason."""
-        self._active = False
-        self._ringing = False
+        if send_signaling:
+            self._transition(
+                SessionState.ENDED,
+                event="idle",
+                reason=TerminalReason.LOCAL_HANGUP.value,
+            )
+        else:
+            self._transition(SessionState.ENDED, event=False)
         while not self._tx_queue.empty():
             try:
                 self._tx_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-
-        if send_signaling:
-            self._fire_terminal_state(
-                "idle",
-                reason=TerminalReason.LOCAL_HANGUP.value,
-            )
 
         await cancel_task(self._tx_task)
         self._tx_task = None
@@ -493,14 +522,14 @@ class IntercomSession:
             return True
         if not await self._transport.send_decline(reason):
             return False
-        self._fire_terminal_state("idle", reason=reason)
+        self._transition(SessionState.ENDED, event="idle", reason=reason)
         await self.stop(send_signaling=False)
         return True
 
     async def answer(self) -> bool:
-        """Send ANSWER to a ringing ESP. True on success."""
-        if not self._ringing or not self._transport:
-            _LOGGER.warning("answer() called but not ringing or no client")
+        """Send ANSWER to an incoming ringing ESP. True on success."""
+        if self._state is not SessionState.RINGING_IN or not self._transport:
+            _LOGGER.warning("answer() refused: state=%s transport=%s", self._state, bool(self._transport))
             return False
 
         result = await self._transport.send_answer()
@@ -515,7 +544,7 @@ class IntercomSession:
         Lets the card auto-answer (localStorage flag) or present the call
         to the user. Caller then invokes answer() or stop().
         """
-        if self._active or self._ringing:
+        if self._state in (SessionState.STREAMING, SessionState.RINGING_IN, SessionState.RINGING_OUT):
             return True
         self._transport = self._create_transport()
         if not await self._transport.connect():
@@ -523,27 +552,19 @@ class IntercomSession:
         if not await self._transport.send_ring():
             await self._transport.disconnect()
             return False
-        self._ringing = True
-        _fire_call_event(
-            self.hass,
-            {
-                "device_id": self.device_id,
-                "state": "ringing",
-                "caller": caller_name,
-            },
-            "session",
-        )
+        self._transition(SessionState.RINGING_IN, event="ringing", caller=caller_name)
         return True
 
     async def answer_esp_call(self) -> str:
         """Answer an ESP-initiated call. Returns "streaming" / "error"."""
-        if self._active:
+        if self._state is SessionState.STREAMING:
             return "streaming"
 
         self._transport = self._create_transport()
 
         if not await self._transport.connect():
             return "error"
+        self._transition(SessionState.CONNECTING, event=False)
 
         if not await self._transport.send_answer_blind():
             await self._transport.disconnect()
@@ -554,7 +575,7 @@ class IntercomSession:
     async def _tx_sender(self) -> None:
         """Single task that sends audio from queue to the active transport."""
         try:
-            while self._active and self._transport:
+            while self.is_active and self._transport:
                 data = await self._tx_queue.get()
                 await self._transport.send_audio(data)
         except asyncio.CancelledError:
@@ -562,7 +583,7 @@ class IntercomSession:
 
     def queue_audio(self, data: bytes) -> None:
         """Non-blocking enqueue; drops oldest on full to keep latency bounded."""
-        if not self._active or not _has_speaker(self.audio_mode):
+        if not self.is_active or not _has_speaker(self.audio_mode):
             return
         self._last_browser_audio = time.monotonic()
         _put_latest(self._tx_queue, data)
@@ -1278,7 +1299,7 @@ class IntercomAudioWebSocketView(HomeAssistantView):
         session: IntercomSession | None = _sessions.get(device_id)
         if session is not None:
             session.bind_audio_ws(ws)
-            await ws.send_str(json.dumps({"state": "streaming" if session.is_active else "ringing"}))
+            await _ws_send_json(ws, {"state": "streaming" if session.is_active else "ringing"})
 
         try:
             async for msg in ws:
@@ -1316,7 +1337,7 @@ class IntercomAudioWebSocketView(HomeAssistantView):
         if kind == "start":
             host = str(payload.get("host") or "")
             if not device_id or not host:
-                await ws.send_str(json.dumps({"error": "missing start target"}))
+                await _ws_send_json(ws, {"error": "missing start target"})
                 return None
             if device_id in _sessions:
                 await _sessions.pop(device_id).stop()
@@ -1330,9 +1351,12 @@ class IntercomAudioWebSocketView(HomeAssistantView):
             result = await session.start()
             if result in ("streaming", "ringing"):
                 _sessions[device_id] = session
-                await ws.send_str(json.dumps({"state": result}))
+                session.bind_audio_ws(ws)
+                if not await _ws_send_json(ws, {"state": result}):
+                    await session.unbind_audio_ws(ws)
+                    return None
                 return session
-            await ws.send_str(json.dumps({"error": "connection_failed"}))
+            await _ws_send_json(ws, {"error": "connection_failed"})
             return None
 
         if kind == "ha_softphone_start":
@@ -1342,10 +1366,10 @@ class IntercomAudioWebSocketView(HomeAssistantView):
                 None,
             )
             if target is None or not target.get("host"):
-                await ws.send_str(json.dumps({"error": "target_not_found"}))
+                await _ws_send_json(ws, {"error": "target_not_found"})
                 return None
             if _sessions:
-                await ws.send_str(json.dumps({"error": "busy"}))
+                await _ws_send_json(ws, {"error": "busy"})
                 return None
             session = IntercomSession(
                 hass=hass,
@@ -1364,15 +1388,18 @@ class IntercomAudioWebSocketView(HomeAssistantView):
                     peer_name=target.get("name") or "",
                     target_device_id=target_device_id,
                 )
-                await ws.send_str(json.dumps({"state": result}))
+                session.bind_audio_ws(ws)
+                if not await _ws_send_json(ws, {"state": result}):
+                    await session.unbind_audio_ws(ws)
+                    return None
                 return session
-            await ws.send_str(json.dumps({"error": "connection_failed"}))
+            await _ws_send_json(ws, {"error": "connection_failed"})
             return None
 
         if kind == "answer":
             session = _sessions.get(device_id)
             ok = await session.answer() if session is not None else False
-            await ws.send_str(json.dumps({"state": "streaming" if ok else "error"}))
+            await _ws_send_json(ws, {"state": "streaming" if ok else "error"})
             return session if ok else None
 
         if kind == "answer_esp_call":
@@ -1380,7 +1407,7 @@ class IntercomAudioWebSocketView(HomeAssistantView):
             existing = _sessions.get(device_id)
             if existing is not None and existing.is_ringing:
                 ok = await existing.answer()
-                await ws.send_str(json.dumps({"state": "streaming" if ok else "error"}))
+                await _ws_send_json(ws, {"state": "streaming" if ok else "error"})
                 return existing if ok else None
             if device_id in _sessions:
                 await _sessions.pop(device_id).stop()
@@ -1394,17 +1421,20 @@ class IntercomAudioWebSocketView(HomeAssistantView):
             result = await session.answer_esp_call()
             if result == "streaming":
                 _sessions[device_id] = session
-                await ws.send_str(json.dumps({"state": "streaming"}))
+                session.bind_audio_ws(ws)
+                if not await _ws_send_json(ws, {"state": "streaming"}):
+                    await session.unbind_audio_ws(ws)
+                    return None
                 return session
-            await ws.send_str(json.dumps({"error": "connection_failed"}))
+            await _ws_send_json(ws, {"error": "connection_failed"})
             return None
 
         if kind in ("stop", "hangup"):
             await _stop_device_sessions(device_id, hass=hass)
-            await ws.send_str(json.dumps({"state": "idle"}))
+            await _ws_send_json(ws, {"state": "idle"})
             return None
 
-        await ws.send_str(json.dumps({"error": "unknown_control"}))
+        await _ws_send_json(ws, {"error": "unknown_control"})
         return None
 
 

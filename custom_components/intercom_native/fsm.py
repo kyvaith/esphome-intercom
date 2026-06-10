@@ -29,6 +29,38 @@ class TerminalReason(StrEnum):
     DND = "DND"
 
 
+class SessionState(StrEnum):
+    """Internal lifecycle of one HA-owned session."""
+
+    IDLE = "s_idle"
+    CONNECTING = "s_connecting"
+    RINGING_IN = "s_ringing_in"
+    RINGING_OUT = "s_ringing_out"
+    STREAMING = "s_streaming"
+    ENDED = "s_ended"
+
+
+SESSION_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
+    SessionState.IDLE: frozenset(
+        {SessionState.CONNECTING, SessionState.RINGING_IN, SessionState.ENDED}
+    ),
+    SessionState.CONNECTING: frozenset(
+        {SessionState.STREAMING, SessionState.RINGING_OUT, SessionState.ENDED}
+    ),
+    SessionState.RINGING_IN: frozenset({SessionState.STREAMING, SessionState.ENDED}),
+    SessionState.RINGING_OUT: frozenset(
+        {SessionState.RINGING_OUT, SessionState.STREAMING, SessionState.ENDED}
+    ),
+    SessionState.STREAMING: frozenset({SessionState.ENDED}),
+    SessionState.ENDED: frozenset(),
+}
+
+
+def can_transition(current: SessionState, target: SessionState) -> bool:
+    """True when the session transition is legal."""
+    return target in SESSION_TRANSITIONS[current]
+
+
 def terminal_state_for_decline(reason: str) -> str:
     """Empty DECLINE is normal remote hangup; non-empty is declined."""
     return "declined" if reason else "idle"

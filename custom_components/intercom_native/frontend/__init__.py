@@ -14,6 +14,14 @@ CARD_JS = "intercom-card.js"
 FRONTEND_DIR = Path(__file__).parent
 
 
+def _frontend_asset_stamp() -> int:
+    """Return the newest frontend JS mtime for Lovelace cache busting."""
+    return max(
+        (int(path.stat().st_mtime) for path in FRONTEND_DIR.glob("*.js")),
+        default=0,
+    )
+
+
 class JSModuleRegistration:
     """Registers the Lovelace card JS module in Home Assistant."""
 
@@ -56,10 +64,7 @@ class JSModuleRegistration:
         await resources.async_get_info()
 
         url = f"{URL_BASE}/{CARD_JS}"
-        try:
-            asset_stamp = int((FRONTEND_DIR / CARD_JS).stat().st_mtime)
-        except OSError:
-            asset_stamp = 0
+        asset_stamp = await self.hass.async_add_executor_job(_frontend_asset_stamp)
         url_versioned = f"{url}?v={INTEGRATION_VERSION}-{asset_stamp}"
 
         for item in resources.async_items():

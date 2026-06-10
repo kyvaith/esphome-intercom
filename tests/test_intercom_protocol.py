@@ -194,6 +194,12 @@ class FakeTransport:
         self.audio_sent.append(data)
         return True
 
+    async def send_answer(self):
+        return True
+
+    async def send_ring(self):
+        return True
+
 
 class FakeWebSocket:
     def __init__(self):
@@ -346,6 +352,15 @@ class IntercomWebSocketSessionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.stop_count, 1)
         self.assertEqual(transport.disconnect_count, 1)
 
+    async def test_rebinding_same_audio_ws_is_idempotent(self) -> None:
+        session, _transport = await self._started_session()
+        ws = FakeWebSocket()
+        session.bind_audio_ws(ws)
+        session.bind_audio_ws(ws)
+
+        self.assertFalse(ws.closed)
+        self.assertIs(websocket_api._sessions.get("device-a"), session)
+
     async def test_audio_ws_watchdog_hangs_up_idle_browser_audio(self) -> None:
         old_interval = websocket_api.WS_AUDIO_WATCHDOG_INTERVAL
         old_timeout = websocket_api.WS_AUDIO_IDLE_TIMEOUT
@@ -388,6 +403,104 @@ class IntercomWebSocketSessionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(websocket_api._sessions), 1)
         self.assertIsNot(first, second)
         self.assertTrue(second._tx_task is not None and not second._tx_task.done())
+
+
+class IntercomSessionFsmTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.hass = FakeHass()
+
+    async def asyncTearDown(self) -> None:
+        websocket_api._sessions.clear()
+        for task in self.hass.tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*self.hass.tasks, return_exceptions=True)
+
+    def _session(self, transport=None, audio_mode="full_duplex"):
+        return websocket_api.IntercomSession(
+            hass=self.hass,
+            device_id="device-fsm",
+            host="192.0.2.10",
+            transport=transport or FakeTransport(),
+            audio_mode=audio_mode,
+        )
+
+    def _session_events(self):
+        return [
+            payload
+            for event_type, payload in self.hass.bus.events
+            if event_type == websocket_api.CALL_EVENT and payload.get("scope") == "session"
+        ]
+
+    def test_table_ended_is_absorbing_and_all_states_reachable(self) -> None:
+        targets = set()
+        for state, allowed in fsm.SESSION_TRANSITIONS.items():
+            self.assertIn(state, fsm.SessionState)
+            targets.update(allowed)
+        self.assertEqual(fsm.SESSION_TRANSITIONS[fsm.SessionState.ENDED], frozenset())
+        for state in fsm.SessionState:
+            if state is fsm.SessionState.IDLE:
+                continue
+            self.assertIn(state, targets, f"{state} unreachable")
+
+    async def test_terminal_event_fires_exactly_once(self) -> None:
+        session = self._session()
+        self.assertEqual(await session.start(), "streaming")
+        session._on_stop_received()
+        session._on_stop_received()
+        session._on_disconnected()
+        terminal = [
+            payload for payload in self._session_events()
+            if payload["state"] in ("idle", "disconnected", "declined", "error")
+        ]
+        self.assertEqual(len(terminal), 1)
+        self.assertEqual(terminal[0]["state"], "idle")
+        self.assertEqual(terminal[0]["reason"], fsm.TerminalReason.REMOTE_HANGUP.value)
+        self.assertIs(session.state, fsm.SessionState.ENDED)
+
+    async def test_answer_refused_on_outgoing_ring(self) -> None:
+        session = self._session(FakeTransport(result="ringing"))
+        self.assertEqual(await session.start(), "ringing")
+        self.assertIs(session.state, fsm.SessionState.RINGING_OUT)
+        self.assertFalse(await session.answer())
+        self.assertIs(session.state, fsm.SessionState.RINGING_OUT)
+
+    async def test_answer_allowed_on_incoming_ring(self) -> None:
+        session = self._session()
+        self.assertTrue(await session.start_ringing(caller_name="Porta"))
+        self.assertIs(session.state, fsm.SessionState.RINGING_IN)
+        ringing = [payload for payload in self._session_events() if payload["state"] == "ringing"]
+        self.assertEqual(len(ringing), 1)
+        self.assertEqual(ringing[0]["caller"], "Porta")
+        self.assertTrue(await session.answer())
+        self.assertIs(session.state, fsm.SessionState.STREAMING)
+
+    async def test_start_refused_after_terminal(self) -> None:
+        session = self._session()
+        self.assertEqual(await session.start(), "streaming")
+        await session.stop()
+        self.assertIs(session.state, fsm.SessionState.ENDED)
+        self.assertEqual(await session.start(), "error")
+
+    async def test_duplicate_answered_spawns_single_tx_task(self) -> None:
+        session = self._session()
+        self.assertEqual(await session.start(), "streaming")
+        first_tx = session._tx_task
+        self.assertIsNotNone(first_tx)
+        session._on_answered()
+        session._on_answered()
+        self.assertIs(session._tx_task, first_tx)
+        streaming = [payload for payload in self._session_events() if payload["state"] == "streaming"]
+        self.assertEqual(len(streaming), 1)
+        await session.stop()
+
+    async def test_stop_after_remote_terminal_is_silent(self) -> None:
+        session = self._session()
+        self.assertEqual(await session.start(), "streaming")
+        session._on_decline_received("busy")
+        before = len(self._session_events())
+        await session.stop(send_signaling=False)
+        self.assertEqual(len(self._session_events()), before)
 
 
 if __name__ == "__main__":
