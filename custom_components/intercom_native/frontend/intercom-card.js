@@ -56,6 +56,7 @@ class IntercomCard extends HTMLElement {
 
     // Device info
     this._activeDeviceInfo = null;
+    this._resolvedDeviceId = null;
     this._availableDevices = [];
     this._availableDevicesLoading = false;
     this._availableDevicesRetryTimer = null;
@@ -423,7 +424,10 @@ class IntercomCard extends HTMLElement {
   }
 
   setConfig(config) {
+    const oldSelector = this.config?.entity_id || this.config?.device_id || "";
     this.config = config;
+    const newSelector = this.config?.entity_id || this.config?.device_id || "";
+    if (oldSelector !== newSelector) this._resolvedDeviceId = null;
     this._softphoneTargetDeviceId =
       this._loadSoftphoneTargetPreference() ||
       this._softphoneTargetDeviceId;
@@ -595,6 +599,10 @@ class IntercomCard extends HTMLElement {
 
   _getConfigDeviceId() {
     if (this._isHaSoftphoneMode()) return HA_SOFTPHONE_DEVICE_ID;
+    return this._resolvedDeviceId || this._getConfigSelector();
+  }
+
+  _getConfigSelector() {
     return this.config?.entity_id || this.config?.device_id;
   }
 
@@ -715,18 +723,7 @@ class IntercomCard extends HTMLElement {
 
   _deviceMatchesConfig(device) {
     const deviceId = this._getConfigDeviceId();
-    return !!device && !!deviceId && (
-      device.device_id === deviceId ||
-      device.esphome_id === deviceId ||
-      device.name === deviceId ||
-      device.name?.toLowerCase().replace(/\s+/g, "-") === deviceId
-    );
-  }
-
-  _findDeviceByName(name) {
-    const wanted = (name || "").trim();
-    if (!wanted) return null;
-    return this._availableDevices.find(d => (d.name || "").trim() === wanted) || null;
+    return !!device && !!deviceId && device.device_id === deviceId;
   }
 
   _normaliseAudioMode(value) {
@@ -753,20 +750,8 @@ class IntercomCard extends HTMLElement {
            this._normaliseTransport(device?.transport);
   }
 
-  _getDestinationTransport(destination) {
-    const device = this._findDeviceByName(destination);
-    return this._transportFromEntity(device?.entities?.intercom_transport) ||
-           this._normaliseTransport(device?.transport);
-  }
-
   _getOwnAudioMode() {
     const device = this._activeDeviceInfo || this._availableDevices.find(d => this._deviceMatchesConfig(d));
-    return this._normaliseAudioMode(device?.audio_mode);
-  }
-
-  _getDestinationAudioMode(destination) {
-    if (this._isHaName(destination)) return "full_duplex";
-    const device = this._findDeviceByName(destination);
     return this._normaliseAudioMode(device?.audio_mode);
   }
 
@@ -791,14 +776,8 @@ class IntercomCard extends HTMLElement {
     if (!this.config?.show_extended_info) return "ESP - ESP";
 
     const sourceTransport = this._getOwnTransport();
-    const destTransport = this._getDestinationTransport(destination);
     const sourceMode = this._audioModeLabel(this._getOwnAudioMode());
-    const destMode = this._audioModeLabel(this._getDestinationAudioMode(destination));
-    if (sourceTransport && destTransport && sourceTransport !== destTransport) {
-      return `Inter-protocol ${sourceTransport}/${sourceMode}-${destTransport}/${destMode}`;
-    }
-    if (sourceTransport && destTransport) return `ESP - ESP ${sourceTransport} ${sourceMode}-${destMode}`;
-    return "ESP - ESP";
+    return sourceTransport ? `ESP - ESP ${sourceTransport} ${sourceMode}` : "ESP - ESP";
   }
 
   _isHaName(name) {
@@ -1574,24 +1553,6 @@ class IntercomCard extends HTMLElement {
     await intercomEngine.answerEspCall(deviceInfo);
   }
 
-  async _startBridge(sourceDevice, destinationName) {
-    const destDevice = this._availableDevices.find(d => d.name === destinationName);
-    if (!destDevice?.device_id) {
-      throw new Error(`Destination "${destinationName}" not available`);
-    }
-
-    // PBX-lite: HA never opens a bridge directly. Calling intercom_native.call
-    // tells the source ESP to start its own outgoing call (FSM goes to
-    // OUTGOING and emits MSG_START). HA reactively opens the BridgeSession
-    // when that unsolicited MSG_START arrives.
-    await this._hass.callService("intercom_native", "call", {
-      source: sourceDevice.device_id,
-      device_id: destDevice.device_id,
-    });
-    // The bridge is created asynchronously HA-side when the source ESP
-    // emits MSG_START; we track its state via the intercom_state sensor.
-  }
-
   async _answer() {
     const deviceInfo = await this._getDeviceInfo();
     if (!deviceInfo?.device_id) {
@@ -1826,26 +1787,20 @@ class IntercomCard extends HTMLElement {
 
   async _getDeviceInfo() {
     try {
-      const result = await this._hass.connection.sendMessagePromise({
-        type: "intercom_native/list_devices",
-      });
-      if (result?.devices) {
-        const configId = this.config.entity_id || this.config.device_id;
-        if (this._isHaSoftphoneMode()) {
-          return result.devices.find(d => d.device_id === HA_SOFTPHONE_DEVICE_ID) || {
-            device_id: HA_SOFTPHONE_DEVICE_ID,
-            name: this._getHaName(),
-            audio_mode: "full_duplex",
-            softphone: true,
-          };
-        }
-        return result.devices.find(d =>
-          d.device_id === configId ||
-          d.esphome_id === configId ||
-          d.name === configId ||
-          d.name?.toLowerCase().replace(/\s+/g, '-') === configId
-        );
+      if (this._isHaSoftphoneMode()) {
+        return {
+          device_id: HA_SOFTPHONE_DEVICE_ID,
+          name: this._getHaName(),
+          audio_mode: "full_duplex",
+          softphone: true,
+        };
       }
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "intercom_native/resolve_device",
+        device_id: this._getConfigSelector(),
+      });
+      if (result?.device?.device_id) this._resolvedDeviceId = result.device.device_id;
+      return result?.device || null;
     } catch (err) {
       console.error("Failed to get device info:", err);
     }

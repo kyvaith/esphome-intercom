@@ -33,6 +33,7 @@ WS_TYPE_START = f"{DOMAIN}/start"
 WS_TYPE_STOP = f"{DOMAIN}/stop"
 WS_TYPE_ANSWER = f"{DOMAIN}/answer"
 WS_TYPE_LIST = f"{DOMAIN}/list_devices"
+WS_TYPE_RESOLVE_DEVICE = f"{DOMAIN}/resolve_device"
 WS_TYPE_HA_SOFTPHONE_START = f"{DOMAIN}/ha_softphone_start"
 WS_TYPE_HA_SOFTPHONE_STATE = f"{DOMAIN}/ha_softphone_state"
 WS_TYPE_SET_HA_SOFTPHONE_DND = f"{DOMAIN}/set_ha_softphone_dnd"
@@ -45,6 +46,7 @@ _bridges: Dict[str, "BridgeSession"] = {}
 
 CALL_EVENT = "intercom_native.call_event"
 WS_AUDIO_IDLE_TIMEOUT = 5.0
+WS_AUDIO_WATCHDOG_INTERVAL = 1.0
 
 
 def _ha_softphone_store(hass: HomeAssistant) -> dict[str, Any]:
@@ -266,7 +268,7 @@ class IntercomSession:
     async def _audio_watchdog(self) -> None:
         try:
             while self._active:
-                await asyncio.sleep(1)
+                await asyncio.sleep(WS_AUDIO_WATCHDOG_INTERVAL)
                 ws = self._audio_ws
                 if ws is None or ws.closed:
                     await _stop_device_sessions(self.device_id, hass=self.hass)
@@ -1417,6 +1419,7 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_answer)
     websocket_api.async_register_command(hass, websocket_answer_esp_call)
     websocket_api.async_register_command(hass, websocket_list_devices)
+    websocket_api.async_register_command(hass, websocket_resolve_device)
     websocket_api.async_register_command(hass, websocket_decline)
 
 
@@ -1898,6 +1901,27 @@ async def websocket_list_devices(
     """List ESPHome devices with intercom capability."""
     devices = [_ha_softphone_device(hass), *(await _get_intercom_devices(hass))]
     connection.send_result(msg["id"], {"devices": devices})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_RESOLVE_DEVICE,
+        vol.Required("device_id"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_resolve_device(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: Dict[str, Any],
+) -> None:
+    selector = msg.get("device_id") or ""
+    if selector == HA_SOFTPHONE_DEVICE_ID:
+        connection.send_result(msg["id"], {"device": _ha_softphone_device(hass)})
+        return
+    from .device_resolver import get_resolver
+    device = await get_resolver(hass).resolve_selector(selector)
+    connection.send_result(msg["id"], {"device": device})
 
 
 def _ha_softphone_device(hass: HomeAssistant) -> dict[str, Any]:

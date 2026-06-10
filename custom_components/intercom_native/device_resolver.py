@@ -271,6 +271,18 @@ class IntercomDeviceResolver:
                 return dev
         return None
 
+    async def resolve_selector(self, selector: str | None) -> Optional[dict]:
+        """Resolve a legacy card selector once and return the canonical device."""
+        wanted = (selector or "").strip()
+        if not wanted:
+            return None
+        for dev in await self.list_devices():
+            if dev.get("device_id") == wanted:
+                return dev
+            if _match_name(wanted, dev.get("name"), dev.get("esphome_id"), dev.get("route_id")):
+                return dev
+        return None
+
     def _route_id_from_device(self, device) -> str:
         """Walk device.config_entries; slugify the linked esphome entry."""
         for entry_id in device.config_entries:
