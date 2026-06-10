@@ -71,11 +71,19 @@ _Runtime demo: browser softphone, ESP call state and audio controls moving toget
   </tr>
 </table>
 
-> **Support this project:** if this work is useful to you, please consider a
-> donation. It helps cover development tools, services and test hardware, which
-> means better compatibility and fewer regressions for everyone.
->
-> [![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-red?logo=github)](https://github.com/sponsors/n-IA-hane)
+<table>
+  <tr>
+    <td>
+      <strong>Support this project</strong><br/>
+      If this work is useful to you, please consider a donation. It helps cover
+      development tools, services and test hardware, which means better
+      compatibility and fewer regressions for everyone.<br/><br/>
+      <a href="https://github.com/sponsors/n-IA-hane">
+        <img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-red?logo=github" alt="Sponsor"/>
+      </a>
+    </td>
+  </tr>
+</table>
 
 ## Table of Contents
 
