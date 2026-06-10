@@ -614,8 +614,8 @@ bool IntercomApi::decode_control_fields_(MessageType type, const uint8_t *data, 
   if (len > 0) {
     off = decode_call_id_prefix(data, len, &out->call_id);
     if (off == 0) {
-      ESP_LOGW(TAG, "control prefix decode failed for MSG 0x%02X (len=%zu)",
-               static_cast<unsigned>(type), len);
+      ESP_LOGW(TAG, "Control prefix decode failed for %s (0x%02X, len=%zu)",
+               message_type_name(type), static_cast<unsigned>(type), len);
       return false;
     }
   }
@@ -939,7 +939,7 @@ handle_incoming_start_in_idle:
       break;
 
     default:
-      ESP_LOGW(TAG, "Unknown control message type: 0x%02X",
+      ESP_LOGW(TAG, "Unknown control message type UNKNOWN (0x%02X)",
                static_cast<unsigned>(type));
       break;
   }

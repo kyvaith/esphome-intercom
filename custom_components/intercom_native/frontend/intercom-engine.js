@@ -63,6 +63,10 @@ class IntercomEngine extends EventTarget {
     return this._deviceId;
   }
 
+  get stats() {
+    return { ...this._stats };
+  }
+
   statsText() {
     if (!this.active) return "";
     return `Sent: ${this._stats.sent} | Recv: ${this._stats.received} | Buf: ${this._stats.buffered_frames}`;

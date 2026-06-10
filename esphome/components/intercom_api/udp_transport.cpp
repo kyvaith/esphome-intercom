@@ -80,7 +80,9 @@ bool UdpTransport::start() {
   // is not a passive PCM listener.
   this->control_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
   if (this->control_socket_ < 0) {
-    ESP_LOGE(TAG, "Failed to create UDP control socket: %d", errno);
+    const int err = errno;
+    ESP_LOGE(TAG, "Failed to create UDP control socket: %s (%d: %s)",
+             socket_errno_name(err), err, socket_errno_text(err));
     return false;
   }
   int ctrl_sockbuf = 4 * 1024;
@@ -95,7 +97,9 @@ bool UdpTransport::start() {
   caddr.sin_addr.s_addr = INADDR_ANY;
   caddr.sin_port = htons(this->control_port_);
   if (bind(this->control_socket_, reinterpret_cast<struct sockaddr *>(&caddr), sizeof(caddr)) < 0) {
-    ESP_LOGE(TAG, "UDP control bind on port %u failed: %d", (unsigned) this->control_port_, errno);
+    const int err = errno;
+    ESP_LOGE(TAG, "UDP control bind on port %u failed: %s (%d: %s)",
+             (unsigned) this->control_port_, socket_errno_name(err), err, socket_errno_text(err));
     close(this->control_socket_); this->control_socket_ = -1;
     return false;
   }
@@ -137,7 +141,9 @@ bool UdpTransport::start_audio_path() {
 
   this->audio_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
   if (this->audio_socket_ < 0) {
-    ESP_LOGE(TAG, "audio socket create: %d", errno);
+    const int err = errno;
+    ESP_LOGE(TAG, "Failed to create UDP audio socket: %s (%d: %s)",
+             socket_errno_name(err), err, socket_errno_text(err));
     this->audio_active_.store(false, std::memory_order_release);
     return false;
   }
@@ -152,7 +158,9 @@ bool UdpTransport::start_audio_path() {
   addr.sin_addr.s_addr = INADDR_ANY;
   addr.sin_port = htons(this->listen_port_);
   if (bind(this->audio_socket_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
-    ESP_LOGE(TAG, "audio bind on %u: %d", (unsigned) this->listen_port_, errno);
+    const int err = errno;
+    ESP_LOGE(TAG, "UDP audio bind on port %u failed: %s (%d: %s)",
+             (unsigned) this->listen_port_, socket_errno_name(err), err, socket_errno_text(err));
     close(this->audio_socket_); this->audio_socket_ = -1;
     this->audio_active_.store(false, std::memory_order_release);
     return false;
@@ -292,7 +300,9 @@ void UdpTransport::send_audio_frame(const uint8_t *pcm, size_t bytes) {
   ssize_t sent = sendto(this->audio_socket_, pcm, bytes, MSG_DONTWAIT,
                         reinterpret_cast<struct sockaddr *>(&dst), sizeof(dst));
   if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-    LOG_W_THROTTLED("UDP audio send error: %d", errno);
+    const int err = errno;
+    LOG_W_THROTTLED("UDP audio send failed: %s (%d: %s)",
+                    socket_errno_name(err), err, socket_errno_text(err));
   }
 }
 
@@ -323,12 +333,14 @@ bool UdpTransport::send_control(MessageType type,
                         reinterpret_cast<struct sockaddr *>(&dst), sizeof(dst));
   if (sent < 0) {
     if (errno != EAGAIN && errno != EWOULDBLOCK) {
-      ESP_LOGW(TAG, "UDP control send error: %d", errno);
+      const int err = errno;
+      ESP_LOGW(TAG, "UDP control send failed: %s (%d: %s)",
+               socket_errno_name(err), err, socket_errno_text(err));
     }
     return false;
   }
-  ESP_LOGD(TAG, "UDP control sent type=0x%02X len=%u port=%u",
-           static_cast<unsigned>(type),
+  ESP_LOGD(TAG, "UDP control sent %s (0x%02X) len=%u port=%u",
+           message_type_name(type), static_cast<unsigned>(type),
            (unsigned) len, (unsigned) ntohs(dst.sin_port));
   return true;
 }
@@ -372,7 +384,9 @@ void UdpTransport::recv_task_() {
       continue;
     }
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-      ESP_LOGW(TAG, "UDP audio recv error: %d", errno);
+      const int err = errno;
+      ESP_LOGW(TAG, "UDP audio receive failed: %s (%d: %s)",
+               socket_errno_name(err), err, socket_errno_text(err));
     }
   }
 
@@ -423,8 +437,8 @@ void UdpTransport::ctrl_task_() {
       if (!from_current && type != MessageType::START) {
         char src_ip[16];
         inet_ntoa_r(src.sin_addr, src_ip, sizeof(src_ip));
-        ESP_LOGD(TAG, "Dropping UDP control 0x%02X from non-current peer %s",
-                 static_cast<unsigned>(hdr.type), src_ip);
+        ESP_LOGD(TAG, "Dropping UDP control %s (0x%02X) from non-current peer %s",
+                 message_type_name(hdr.type), static_cast<unsigned>(hdr.type), src_ip);
         continue;
       }
       if (!from_current && type == MessageType::START &&
@@ -439,8 +453,9 @@ void UdpTransport::ctrl_task_() {
         if (cur == 0 && src_host != 0) {
           char src_ip[16];
           inet_ntoa_r(src.sin_addr, src_ip, sizeof(src_ip));
-          ESP_LOGI(TAG, "Learned caller endpoint %s control=%u from inbound 0x%02X",
-                   src_ip, (unsigned) src_control_port, static_cast<unsigned>(hdr.type));
+          ESP_LOGI(TAG, "Learned caller endpoint %s control=%u from inbound %s (0x%02X)",
+                   src_ip, (unsigned) src_control_port, message_type_name(hdr.type),
+                   static_cast<unsigned>(hdr.type));
           this->remote_ip_v4_.store(src_host, std::memory_order_release);
         }
         if (src_control_port != 0) {
@@ -453,7 +468,9 @@ void UdpTransport::ctrl_task_() {
     if (n >= 0 && n < static_cast<ssize_t>(HEADER_SIZE)) {
       ESP_LOGW(TAG, "UDP control runt datagram (%zd bytes), dropping", n);
     } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-      ESP_LOGW(TAG, "UDP control recv error: %d", errno);
+      const int err = errno;
+      ESP_LOGW(TAG, "UDP control receive failed: %s (%d: %s)",
+               socket_errno_name(err), err, socket_errno_text(err));
     }
   }
 

@@ -21,6 +21,35 @@ enum class MessageType : uint8_t {
   DECLINE = 0x09,  // empty reason = silent remote_hangup; non-empty = user-visible
 };
 
+inline const char *message_type_name(MessageType type) {
+  switch (type) {
+    case MessageType::AUDIO:
+      return "AUDIO";
+    case MessageType::START:
+      return "START";
+    case MessageType::HANGUP:
+      return "HANGUP";
+    case MessageType::PING:
+      return "PING";
+    case MessageType::PONG:
+      return "PONG";
+    case MessageType::ERROR:
+      return "ERROR";
+    case MessageType::RING:
+      return "RING";
+    case MessageType::ANSWER:
+      return "ANSWER";
+    case MessageType::DECLINE:
+      return "DECLINE";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+inline const char *message_type_name(uint8_t type) {
+  return message_type_name(static_cast<MessageType>(type));
+}
+
 // u8-length-prefixed string fields; capped well below UDP MTU.
 static constexpr size_t INTERCOM_MAX_CALL_ID_LEN = 64;
 static constexpr size_t INTERCOM_MAX_ROUTE_ID_LEN = 64;

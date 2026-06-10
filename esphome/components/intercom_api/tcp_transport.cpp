@@ -218,9 +218,13 @@ void TcpTransport::server_task_() {
     fd_set read_fds;
     FD_ZERO(&read_fds);
     int server_fd = this->server_socket_;
-    int max_fd = server_fd;
-    FD_SET(server_fd, &read_fds);
+    int max_fd = -1;
     int client_fd = this->client_.socket.load(std::memory_order_acquire);
+    const bool accepting = client_fd < 0;
+    if (accepting) {
+      FD_SET(server_fd, &read_fds);
+      max_fd = server_fd;
+    }
     if (client_fd >= 0) {
       FD_SET(client_fd, &read_fds);
       if (client_fd > max_fd) max_fd = client_fd;
@@ -229,7 +233,11 @@ void TcpTransport::server_task_() {
     int ret = ::select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
     if (!this->running_.load(std::memory_order_acquire)) break;
     if (ret < 0) {
-      if (errno != EINTR) ESP_LOGW(TAG, "TCP select error: %d", errno);
+      if (errno != EINTR) {
+        const int err = errno;
+        ESP_LOGW(TAG, "TCP server select failed: %s (%d: %s)",
+                 socket_errno_name(err), err, socket_errno_text(err));
+      }
       this->close_server_socket_();
       continue;
     }
@@ -250,7 +258,9 @@ void TcpTransport::server_task_() {
         }
         if (ready < 0) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-          ESP_LOGW(TAG, "TCP recv peek error: %d", errno);
+          const int err = errno;
+          ESP_LOGW(TAG, "TCP client readiness check failed: %s (%d: %s)",
+                   socket_errno_name(err), err, socket_errno_text(err));
           this->close_client_socket_and_notify_();
           break;
         }
@@ -299,7 +309,9 @@ void TcpTransport::server_task_() {
 bool TcpTransport::setup_server_socket_() {
   this->server_socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (this->server_socket_ < 0) {
-    ESP_LOGE(TAG, "Failed to create server socket: %d", errno);
+    const int err = errno;
+    ESP_LOGE(TAG, "Failed to create TCP server socket: %s (%d: %s)",
+             socket_errno_name(err), err, socket_errno_text(err));
     return false;
   }
 
@@ -315,14 +327,18 @@ bool TcpTransport::setup_server_socket_() {
   addr.sin_port = htons(this->tcp_port_);
 
   if (bind(this->server_socket_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
-    ESP_LOGE(TAG, "Bind on port %u failed: %d", (unsigned) this->tcp_port_, errno);
+    const int err = errno;
+    ESP_LOGE(TAG, "TCP bind on port %u failed: %s (%d: %s)",
+             (unsigned) this->tcp_port_, socket_errno_name(err), err, socket_errno_text(err));
     close(this->server_socket_);
     this->server_socket_ = -1;
     return false;
   }
 
   if (listen(this->server_socket_, 4) < 0) {
-    ESP_LOGE(TAG, "Listen failed: %d", errno);
+    const int err = errno;
+    ESP_LOGE(TAG, "TCP listen on port %u failed: %s (%d: %s)",
+             (unsigned) this->tcp_port_, socket_errno_name(err), err, socket_errno_text(err));
     close(this->server_socket_);
     this->server_socket_ = -1;
     return false;
@@ -368,8 +384,14 @@ void TcpTransport::accept_client_() {
                              reinterpret_cast<struct sockaddr *>(&client_addr),
                              &client_len);
     if (client_sock < 0) {
-      if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        ESP_LOGW(TAG, "Accept error: %d", errno);
+      const int err = errno;
+      const bool stale_listener = err == EINVAL &&
+                                  this->client_.socket.load(std::memory_order_acquire) >= 0;
+      if (stale_listener) {
+        ESP_LOGD(TAG, "Ignoring stale listener accept while outbound TCP leg is active");
+      } else if (err != EAGAIN && err != EWOULDBLOCK) {
+        ESP_LOGW(TAG, "TCP accept on listener failed: %s (%d: %s)",
+                 socket_errno_name(err), err, socket_errno_text(err));
       }
       return;
     }
@@ -387,7 +409,8 @@ void TcpTransport::accept_client_() {
     }
 
     if (hello_header.type != static_cast<uint8_t>(MessageType::START)) {
-      ESP_LOGW(TAG, "Expected MSG_START, got type=0x%02x", hello_header.type);
+      ESP_LOGW(TAG, "Expected TCP START as first message, got %s (0x%02x)",
+               message_type_name(hello_header.type), hello_header.type);
       close(client_sock);
       continue;
     }
@@ -482,8 +505,9 @@ bool TcpTransport::originate(const std::string &host, uint16_t port) {
 
   int sock = socket(AF_INET, SOCK_STREAM, 0);
   if (sock < 0) {
-    ESP_LOGW(TAG, "originate(%s:%u): socket() failed errno=%d",
-             host.c_str(), (unsigned) port, errno);
+    const int err = errno;
+    ESP_LOGW(TAG, "TCP originate to %s:%u failed creating socket: %s (%d: %s)",
+             host.c_str(), (unsigned) port, socket_errno_name(err), err, socket_errno_text(err));
     return false;
   }
 
@@ -505,7 +529,7 @@ bool TcpTransport::originate(const std::string &host, uint16_t port) {
       struct timeval tv{};
       tv.tv_sec = 0;
       tv.tv_usec = 10000;
-      int ready = select(sock + 1, nullptr, &wfds, nullptr, &tv);
+      int ready = ::select(sock + 1, nullptr, &wfds, nullptr, &tv);
       if (ready > 0 && FD_ISSET(sock, &wfds)) {
         int so_error = 0;
         socklen_t len = sizeof(so_error);
@@ -523,8 +547,9 @@ bool TcpTransport::originate(const std::string &host, uint16_t port) {
   }
 
   if (!connected) {
-    ESP_LOGW(TAG, "originate(%s:%u): connect() failed/timeout errno=%d",
-             host.c_str(), (unsigned) port, errno);
+    const int err = errno;
+    ESP_LOGW(TAG, "TCP originate to %s:%u failed connecting: %s (%d: %s)",
+             host.c_str(), (unsigned) port, socket_errno_name(err), err, socket_errno_text(err));
     close(sock);
     return false;
   }
@@ -629,7 +654,9 @@ void TcpTransport::send_audio_chunk_(int socket, const uint8_t *data, size_t len
   if (sent < 0) {
     if (errno != EAGAIN && errno != EWOULDBLOCK &&
         this->client_.streaming.load(std::memory_order_acquire)) {
-      LOG_W_THROTTLED("TX send error: %d", errno);
+      const int err = errno;
+      LOG_W_THROTTLED("TCP audio send failed: %s (%d: %s)",
+                      socket_errno_name(err), err, socket_errno_text(err));
     }
     return;  // nothing on the wire, peer never saw a partial header
   }

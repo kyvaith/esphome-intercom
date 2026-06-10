@@ -252,6 +252,8 @@ class IntercomSession:
         **extra: Any,
     ) -> bool:
         current = self._state
+        if target is current:
+            return False
         if not can_transition(current, target):
             _LOGGER.debug("Session %s ignored transition %s -> %s", self.device_id, current, target)
             return False
