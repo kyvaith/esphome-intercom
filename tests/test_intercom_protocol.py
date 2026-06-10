@@ -334,8 +334,40 @@ class IntercomProtocolFixturesTest(unittest.TestCase):
         converted = audio_pcm.convert_audio_frame(raw, src, dst)
         self.assertEqual(len(converted), dst.nominal_frame_bytes)
 
+    def test_pcm_conversion_downmixes_stereo_by_averaging_channels(self) -> None:
+        src = audio_format.AudioFormat(16000, "s16le", 2, 20)
+        dst = audio_format.AudioFormat(16000, "s16le", 1, 20)
+        left = int(0.5 * 32767).to_bytes(2, "little", signed=True)
+        right = int(-0.5 * 32768).to_bytes(2, "little", signed=True)
+        converted = audio_pcm.convert_audio_frame((left + right) * src.nominal_frame_samples, src, dst)
+        self.assertLess(max(abs(int.from_bytes(converted[i:i + 2], "little", signed=True))
+                            for i in range(0, len(converted), 2)), 2)
+
+    def test_pcm_resampler_uses_sample_rate_ratio_not_frame_endpoint_fit(self) -> None:
+        samples = [float(sample) for sample in range(20)]
+        self.assertEqual(
+            audio_pcm._resample_channel(samples, 5, 48000, 16000),
+            [0.0, 3.0, 6.0, 9.0, 12.0],
+        )
+
+    def test_pcm_frame_converter_reframes_different_frame_durations(self) -> None:
+        src = audio_format.AudioFormat(48000, "s32le", 1, 20)
+        dst = audio_format.AudioFormat(16000, "s16le", 1, 32)
+        converter = audio_pcm.PcmFrameConverter(src, dst)
+        raw = b"\0" * src.nominal_frame_bytes
+        self.assertEqual(converter.convert(raw), [])
+        frames = converter.convert(raw)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(len(frames[0]), dst.nominal_frame_bytes)
+
+    def test_pcm_frame_converter_rejects_wrong_input_frame_size(self) -> None:
+        fmt = audio_format.AudioFormat(16000, "s16le", 1, 20)
+        converter = audio_pcm.PcmFrameConverter(fmt, fmt)
+        with self.assertRaises(ValueError):
+            converter.convert(b"\0" * (fmt.nominal_frame_bytes - 2))
+
     def test_pcm_conversion_matrix_for_supported_rates_and_containers(self) -> None:
-        legacy = audio_format.LEGACY_AUDIO_FORMAT
+        legacy_20ms = audio_format.AudioFormat(16000, "s16le", 1, 20)
         for rate in sorted(audio_format.SUPPORTED_SAMPLE_RATES):
             for pcm in audio_format.PcmFormat:
                 with self.subTest(rate=rate, pcm=pcm.value):
@@ -346,9 +378,9 @@ class IntercomProtocolFixturesTest(unittest.TestCase):
                         raw[i * src.container_bytes_per_sample:(i + 1) * src.container_bytes_per_sample] = (
                             audio_pcm._encode_sample(sample, src.pcm_format)
                         )
-                    converted = audio_pcm.convert_audio_frame(bytes(raw), src, legacy)
-                    self.assertEqual(len(converted), legacy.nominal_frame_bytes)
-                    roundtrip = audio_pcm.convert_audio_frame(converted, legacy, src)
+                    converted = audio_pcm.convert_audio_frame(bytes(raw), src, legacy_20ms)
+                    self.assertEqual(len(converted), legacy_20ms.nominal_frame_bytes)
+                    roundtrip = audio_pcm.convert_audio_frame(converted, legacy_20ms, src)
                     self.assertEqual(len(roundtrip), src.nominal_frame_bytes)
                     self.assertNotEqual(converted, b"\0" * len(converted))
 

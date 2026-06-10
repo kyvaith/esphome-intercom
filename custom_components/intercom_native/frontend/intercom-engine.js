@@ -294,6 +294,19 @@ class IntercomEngine extends EventTarget {
     return ["full_duplex", "mic_only", "speaker_only", "control_only"].includes(v) ? v : "full_duplex";
   }
 
+  async _setupAudioOrAbort(deviceId, deviceInfo, reply) {
+    try {
+      await this._setupAudio(deviceInfo, reply);
+      return true;
+    } catch (err) {
+      console.error("intercom-engine: audio setup failed", err);
+      this.dispatchEvent(new CustomEvent("error", { detail: err?.message || String(err) }));
+      await this.stop(deviceId).catch(() => this.close("audio_setup_failed"));
+      this._setState("ERROR");
+      return false;
+    }
+  }
+
   async startP2P(deviceInfo) {
     await this._connect(deviceInfo.device_id);
     this._resetStats();
@@ -303,7 +316,7 @@ class IntercomEngine extends EventTarget {
       this._setState("ERROR");
       return;
     }
-    await this._setupAudio(deviceInfo, reply);
+    if (!await this._setupAudioOrAbort(deviceInfo.device_id, deviceInfo, reply)) return;
     this._setState(reply.state);
   }
 
@@ -317,7 +330,11 @@ class IntercomEngine extends EventTarget {
       this._setState("ERROR");
       return;
     }
-    await this._setupAudio({ ...info, tx_formats: target.tx_formats, rx_formats: target.rx_formats }, reply);
+    if (!await this._setupAudioOrAbort(
+      HA_SOFTPHONE_DEVICE_ID,
+      { ...info, tx_formats: target.tx_formats, rx_formats: target.rx_formats },
+      reply,
+    )) return;
     this._setState(reply.state);
   }
 
@@ -330,7 +347,7 @@ class IntercomEngine extends EventTarget {
       this._setState("ERROR");
       return;
     }
-    await this._setupAudio({ ...(deviceInfo || {}), device_id: deviceId }, reply);
+    if (!await this._setupAudioOrAbort(deviceId, { ...(deviceInfo || {}), device_id: deviceId }, reply)) return;
     this._setState("STREAMING");
   }
 
@@ -342,7 +359,7 @@ class IntercomEngine extends EventTarget {
       this._setState("ERROR");
       return;
     }
-    await this._setupAudio(deviceInfo, reply);
+    if (!await this._setupAudioOrAbort(deviceInfo.device_id, deviceInfo, reply)) return;
     this._setState("STREAMING");
   }
 

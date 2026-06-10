@@ -51,22 +51,43 @@ def _decode_frame(data: bytes, fmt: AudioFormat) -> list[list[float]]:
     return channels
 
 
-def _resample_channel(samples: list[float], out_frames: int) -> list[float]:
+def _map_channels(channels: list[list[float]], out_channels: int) -> list[list[float]]:
+    if out_channels == 1 and len(channels) > 1:
+        return [[sum(frame) / len(channels) for frame in zip(*channels)]]
+    if out_channels <= len(channels):
+        return channels[:out_channels]
+    return channels + [channels[-1]] * (out_channels - len(channels))
+
+
+def _resample_channel(samples: list[float], out_frames: int, src_rate: int, dst_rate: int) -> list[float]:
     if not samples or out_frames <= 0:
         return [0.0] * max(0, out_frames)
     if len(samples) == out_frames:
         return samples
-    if out_frames == 1:
-        return [samples[0]]
-    scale = (len(samples) - 1) / (out_frames - 1)
+    ratio = src_rate / dst_rate
     out: list[float] = []
     for index in range(out_frames):
-        pos = index * scale
+        pos = index * ratio
         left = int(pos)
+        if left >= len(samples):
+            out.append(samples[-1])
+            continue
         right = min(left + 1, len(samples) - 1)
         frac = pos - left
         out.append(samples[left] + (samples[right] - samples[left]) * frac)
     return out
+
+
+def _encode_frame(channels: list[list[float]], dst: AudioFormat) -> bytes:
+    out_frames = len(channels[0]) if channels else 0
+    out = bytearray(out_frames * dst.channels * dst.container_bytes_per_sample)
+    offset = 0
+    for frame in range(out_frames):
+        for channel in range(dst.channels):
+            encoded = _encode_sample(channels[channel][frame], dst.pcm_format)
+            out[offset:offset + len(encoded)] = encoded
+            offset += len(encoded)
+    return bytes(out)
 
 
 def convert_audio_frame(data: bytes, src: AudioFormat, dst: AudioFormat) -> bytes:
@@ -77,15 +98,54 @@ def convert_audio_frame(data: bytes, src: AudioFormat, dst: AudioFormat) -> byte
     """
     if src == dst:
         return data
-    src_channels = _decode_frame(data, src)
+    if src.frame_ms != dst.frame_ms:
+        raise ValueError(
+            f"frame_ms conversion requires stateful reframing: {src.wire_token()} -> {dst.wire_token()}"
+        )
+    src_channels = _map_channels(_decode_frame(data, src), dst.channels)
     out_frames = dst.nominal_frame_samples
-    resampled = [_resample_channel(channel, out_frames) for channel in src_channels]
-    out = bytearray(out_frames * dst.channels * dst.container_bytes_per_sample)
-    offset = 0
-    for frame in range(out_frames):
-        for channel in range(dst.channels):
-            sample = resampled[min(channel, len(resampled) - 1)][frame]
-            encoded = _encode_sample(sample, dst.pcm_format)
-            out[offset:offset + len(encoded)] = encoded
-            offset += len(encoded)
-    return bytes(out)
+    resampled = [
+        _resample_channel(channel, out_frames, src.sample_rate, dst.sample_rate)
+        for channel in src_channels
+    ]
+    return _encode_frame(resampled, dst)
+
+
+class PcmFrameConverter:
+    """Stateful PCM converter that also reframes differing frame durations."""
+
+    def __init__(self, src: AudioFormat, dst: AudioFormat) -> None:
+        self.src = src
+        self.dst = dst
+        self._pending = [[] for _ in range(dst.channels)]
+
+    def convert(self, data: bytes) -> list[bytes]:
+        if len(data) != self.src.nominal_frame_bytes:
+            raise ValueError(
+                f"audio frame length {len(data)} does not match {self.src.wire_token()} "
+                f"({self.src.nominal_frame_bytes} bytes)"
+            )
+        if self.src == self.dst:
+            return [data]
+
+        src_channels = _map_channels(_decode_frame(data, self.src), self.dst.channels)
+        chunk_frames = (self.src.frame_ms * self.dst.sample_rate) // 1000
+        if self.src.frame_ms * self.dst.sample_rate % 1000:
+            raise ValueError(
+                f"{self.src.wire_token()} cannot be reframed exactly at {self.dst.sample_rate} Hz"
+            )
+        resampled = [
+            _resample_channel(channel, chunk_frames, self.src.sample_rate, self.dst.sample_rate)
+            for channel in src_channels
+        ]
+        for channel, samples in enumerate(resampled):
+            self._pending[channel].extend(samples)
+
+        out: list[bytes] = []
+        frame_samples = self.dst.nominal_frame_samples
+        while len(self._pending[0]) >= frame_samples:
+            frame_channels = [channel[:frame_samples] for channel in self._pending]
+            out.append(_encode_frame(frame_channels, self.dst))
+            for channel in self._pending:
+                del channel[:frame_samples]
+        return out

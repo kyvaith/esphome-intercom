@@ -65,7 +65,7 @@ class IntercomPlaybackProcessor extends AudioWorkletProcessor {
     }
     const view = new DataView(buffer);
     for (let i = 0; i < this._contextFrameSamples; i++) {
-      const srcPos = i * (this._format.frameSamples - 1) / Math.max(1, this._contextFrameSamples - 1);
+      const srcPos = i * this._format.sampleRate / sampleRate;
       const base = Math.floor(srcPos);
       const frac = srcPos - base;
       for (let ch = 0; ch < this._format.channels; ch++) {

@@ -273,17 +273,16 @@ class IntercomTcpClient(IntercomTransport):
             self._track_audio_drop("no_writer", len(data))
             return False
 
-        self._audio_sent += 1
-
         try:
             self._writer.write(protocol.build_frame(MSG_AUDIO, data))
             await asyncio.wait_for(self._writer.drain(), timeout=0.1)
+            self._audio_sent += 1
             return True
         except asyncio.TimeoutError:
             self._track_audio_drop("drain_timeout", len(data))
             return False
         except Exception as err:
-            _LOGGER.error("[TCP#%d] Audio send error: %s", self._instance_id, err)
+            _LOGGER.debug("[TCP#%d] Audio send failed: %s", self._instance_id, err)
             self._track_audio_drop("send_failed", len(data))
             return False
 

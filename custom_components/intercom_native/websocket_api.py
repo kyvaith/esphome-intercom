@@ -25,7 +25,7 @@ from .audio_format import (
     parse_audio_format_list,
     require_udp_safe_formats,
 )
-from .audio_pcm import convert_audio_frame
+from .audio_pcm import PcmFrameConverter
 from .audio_ws import decode_audio_frame, encode_audio_frame
 from .const import DOMAIN, HA_PEER_FALLBACK_NAME, HA_SOFTPHONE_DEVICE_ID
 from .fsm import (
@@ -748,6 +748,8 @@ class BridgeSession:
         self.ha_to_source_format = LEGACY_AUDIO_FORMAT
         self.dest_to_ha_format = LEGACY_AUDIO_FORMAT
         self.ha_to_dest_format = LEGACY_AUDIO_FORMAT
+        self._s2d_converter = PcmFrameConverter(LEGACY_AUDIO_FORMAT, LEGACY_AUDIO_FORMAT)
+        self._d2s_converter = PcmFrameConverter(LEGACY_AUDIO_FORMAT, LEGACY_AUDIO_FORMAT)
 
         self._source_client: Optional[IntercomTransport] = source_transport
         self._dest_client: Optional[IntercomTransport] = None
@@ -782,6 +784,8 @@ class BridgeSession:
         self.ha_to_dest_format = s2d_common or self.dest_rx_formats[0]
         self.dest_to_ha_format = d2s_common or self.dest_tx_formats[0]
         self.ha_to_source_format = d2s_common or source_rx[0]
+        self._s2d_converter = PcmFrameConverter(self.source_to_ha_format, self.ha_to_dest_format)
+        self._d2s_converter = PcmFrameConverter(self.dest_to_ha_format, self.ha_to_source_format)
 
         if self._source_client is not None:
             self._source_client.set_selected_audio_formats(
@@ -794,12 +798,12 @@ class BridgeSession:
                 [self.dest_to_ha_format],
             )
 
-    def _convert_bridge_audio(self, data: bytes, src: AudioFormat, dst: AudioFormat, direction: str) -> bytes | None:
+    def _convert_bridge_audio(self, converter: PcmFrameConverter, data: bytes, direction: str) -> list[bytes]:
         try:
-            return convert_audio_frame(data, src, dst)
+            return converter.convert(data)
         except ValueError as err:
             _LOGGER.warning("Bridge %s dropped invalid %s audio frame: %s", self.bridge_id, direction, err)
-            return None
+            return []
 
     async def _notify_source_answered(self) -> None:
         """Forward ANSWER to the source so it commits to STREAMING
@@ -889,7 +893,10 @@ class BridgeSession:
             while self._active:
                 data = await queue.get()
                 if self._active and client:
-                    await client.send_audio(data)
+                    if not await client.send_audio(data):
+                        _LOGGER.debug("Bridge sender %s stopping after send_audio returned false", direction)
+                        self.hass.async_create_task(self.stop())
+                        break
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -900,24 +907,12 @@ class BridgeSession:
 
     def _source_audio(self, data: bytes) -> None:
         if self._active and _has_mic(self.source_audio_mode) and _has_speaker(self.dest_audio_mode):
-            converted = self._convert_bridge_audio(
-                data,
-                self.source_to_ha_format,
-                self.ha_to_dest_format,
-                "source_to_dest",
-            )
-            if converted is not None:
+            for converted in self._convert_bridge_audio(self._s2d_converter, data, "source_to_dest"):
                 self._push_audio(self._q_source_to_dest, converted)
 
     def _dest_audio(self, data: bytes) -> None:
         if self._active and _has_mic(self.dest_audio_mode) and _has_speaker(self.source_audio_mode):
-            converted = self._convert_bridge_audio(
-                data,
-                self.dest_to_ha_format,
-                self.ha_to_source_format,
-                "dest_to_source",
-            )
-            if converted is not None:
+            for converted in self._convert_bridge_audio(self._d2s_converter, data, "dest_to_source"):
                 self._push_audio(self._q_dest_to_source, converted)
 
     def _source_disconnected(self) -> None:
@@ -1474,8 +1469,10 @@ class IntercomAudioWebSocketView(HomeAssistantView):
                 if msg.type == WSMsgType.BINARY:
                     session = _sessions.get(device_id)
                     if session is not None:
-                        with contextlib.suppress(ValueError):
+                        try:
                             session.queue_audio(decode_audio_frame(msg.data))
+                        except ValueError as err:
+                            await _ws_send_json(ws, {"error": "invalid_audio_frame", "detail": str(err)})
                     continue
                 if msg.type != WSMsgType.TEXT:
                     continue
