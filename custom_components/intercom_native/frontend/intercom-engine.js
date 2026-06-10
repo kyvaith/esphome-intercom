@@ -1,6 +1,6 @@
 const HA_SOFTPHONE_DEVICE_ID = "__intercom_native_ha_softphone__";
 const WS_AUDIO = 1;
-const CALL_EVENT = "intercom_native.call_event";
+const WS_SUBSCRIBE_CALL_EVENTS = "intercom_native/subscribe_call_events";
 const ASSET_V = "3";
 const HIDDEN_HANGUP_GRACE_MS = 15000;
 const CONTROL_ACK_TIMEOUT_MS = 3000;
@@ -49,7 +49,7 @@ class IntercomEngine extends EventTarget {
       this._busUnsub = null;
     }
     this._busConnection = conn;
-    conn.subscribeEvents((event) => this._onBusEvent(event), CALL_EVENT)
+    conn.subscribeMessage((event) => this._onBusEvent(event), { type: WS_SUBSCRIBE_CALL_EVENTS })
       .then((unsub) => { this._busUnsub = unsub; })
       .catch((err) => {
         this._busConnection = null;

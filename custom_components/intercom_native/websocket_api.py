@@ -49,6 +49,7 @@ WS_TYPE_RESOLVE_DEVICE = f"{DOMAIN}/resolve_device"
 WS_TYPE_HA_SOFTPHONE_START = f"{DOMAIN}/ha_softphone_start"
 WS_TYPE_HA_SOFTPHONE_STATE = f"{DOMAIN}/ha_softphone_state"
 WS_TYPE_SET_HA_SOFTPHONE_DND = f"{DOMAIN}/set_ha_softphone_dnd"
+WS_TYPE_SUBSCRIBE_CALL_EVENTS = f"{DOMAIN}/subscribe_call_events"
 
 # Active sessions: device_id -> IntercomSession
 _sessions: Dict[str, "IntercomSession"] = {}
@@ -1618,6 +1619,7 @@ class IntercomAudioWebSocketView(HomeAssistantView):
 def async_register_websocket_api(hass: HomeAssistant) -> None:
     """Register WebSocket API commands."""
     hass.http.register_view(IntercomAudioWebSocketView())
+    websocket_api.async_register_command(hass, websocket_subscribe_call_events)
     websocket_api.async_register_command(hass, websocket_start)
     websocket_api.async_register_command(hass, websocket_ha_softphone_start)
     websocket_api.async_register_command(hass, websocket_ha_softphone_state)
@@ -1628,6 +1630,34 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_list_devices)
     websocket_api.async_register_command(hass, websocket_resolve_device)
     websocket_api.async_register_command(hass, websocket_decline)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_SUBSCRIBE_CALL_EVENTS,
+    }
+)
+@callback
+def websocket_subscribe_call_events(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: Dict[str, Any],
+) -> None:
+    """Subscribe this HA websocket to intercom call events only."""
+    msg_id = msg["id"]
+
+    @callback
+    def forward_call_event(event) -> None:
+        connection.send_event(
+            msg_id,
+            {
+                "event_type": CALL_EVENT,
+                "data": event.data,
+            },
+        )
+
+    connection.subscriptions[msg_id] = hass.bus.async_listen(CALL_EVENT, forward_call_event)
+    connection.send_result(msg_id)
 
 
 @websocket_api.websocket_command(

@@ -606,6 +606,13 @@ def _with_target_device(op_label: str):
     return decorator
 
 
+def _require_service_target(value: dict) -> dict:
+    """Service calls need one explicit device selector in data."""
+    if any(value.get(key) for key in ("device_id", "entity_id", "name", "friendly_name")):
+        return value
+    raise vol.Invalid("provide one target: device_id, entity_id, name, or friendly_name")
+
+
 async def _handle_answer_service(call: ServiceCall, device: dict) -> None:
     hass: HomeAssistant = call.hass
     device_id = device["device_id"]
@@ -960,7 +967,10 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         vol.Optional("name"): cv.string,
         vol.Optional("friendly_name"): cv.string,
     }
-    no_data_schema = vol.Schema(target_fields, extra=vol.PREVENT_EXTRA)
+    target_schema = vol.All(
+        vol.Schema(target_fields, extra=vol.PREVENT_EXTRA),
+        _require_service_target,
+    )
     decline_schema = vol.Schema(
         {**target_fields, vol.Optional("reason", default=""): cv.string},
         extra=vol.PREVENT_EXTRA,
@@ -969,17 +979,22 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         {**target_fields, vol.Optional("source"): cv.string},
         extra=vol.PREVENT_EXTRA,
     )
-    forward_schema = vol.Schema(
-        {**target_fields, vol.Required("forward_to"): cv.string},
-        extra=vol.PREVENT_EXTRA,
+    decline_schema = vol.All(decline_schema, _require_service_target)
+    call_schema = vol.All(call_schema, _require_service_target)
+    forward_schema = vol.All(
+        vol.Schema(
+            {**target_fields, vol.Required("forward_to"): cv.string},
+            extra=vol.PREVENT_EXTRA,
+        ),
+        _require_service_target,
     )
     purge_schema = vol.Schema(
         {**target_fields, vol.Optional("min_unavailable_hours", default=0): vol.Coerce(float)},
         extra=vol.PREVENT_EXTRA,
     )
-    hass.services.async_register(DOMAIN, "answer", handle_answer, schema=no_data_schema)
+    hass.services.async_register(DOMAIN, "answer", handle_answer, schema=target_schema)
     hass.services.async_register(DOMAIN, "decline", handle_decline, schema=decline_schema)
-    hass.services.async_register(DOMAIN, "hangup", handle_hangup, schema=no_data_schema)
+    hass.services.async_register(DOMAIN, "hangup", handle_hangup, schema=target_schema)
     hass.services.async_register(DOMAIN, "call", handle_call, schema=call_schema)
     hass.services.async_register(DOMAIN, "forward", handle_forward, schema=forward_schema)
     hass.services.async_register(DOMAIN, "purge_devices", handle_purge_devices, schema=purge_schema)
