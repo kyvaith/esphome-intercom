@@ -488,7 +488,7 @@ void ESPAudioStack::audio_task_() {
   // to park/wake the inner session loop.
   while (true) {
     this->audio_task_idle_.store(true, std::memory_order_relaxed);
-    TaskHandle_t waiter = this->audio_idle_waiter_.load(std::memory_order_acquire);
+    TaskHandle_t waiter = this->audio_state_waiter_.load(std::memory_order_acquire);
     if (waiter != nullptr) {
       xTaskNotifyGive(waiter);
     }
@@ -501,6 +501,10 @@ void ESPAudioStack::audio_task_() {
       continue;
     }
     this->audio_task_idle_.store(false, std::memory_order_relaxed);
+    waiter = this->audio_state_waiter_.load(std::memory_order_acquire);
+    if (waiter != nullptr) {
+      xTaskNotifyGive(waiter);
+    }
 
     // Run one audio session. Returns on stop() (audio_stack_running_ cleared) or on
     // processor frame_spec change (session restarts in the next outer iter).
@@ -1113,12 +1117,7 @@ void ESPAudioStack::apply_input_conditioning_(AudioTaskCtx &ctx) {
       int16_t s1 = ctx.mic_buffer[i];
 
       if (do_dc) {
-        int32_t inp = (int32_t) s1 << 16;
-        int32_t out = inp - this->dc_prev_input_persistent_ + this->dc_prev_output_persistent_ -
-                      (this->dc_prev_output_persistent_ >> 10);
-        this->dc_prev_input_persistent_ = inp;
-        this->dc_prev_output_persistent_ = out;
-        s1 = static_cast<int16_t>(out >> 16);
+        s1 = this->dc_primary_.process(s1);
       }
       if (do_input_gain_boost) {
         s1 = scale_sample(s1, boost);
@@ -1129,13 +1128,7 @@ void ESPAudioStack::apply_input_conditioning_(AudioTaskCtx &ctx) {
         // mic2 already in processor_mic_buffer interleaved by multi-channel rate conversion.
         int16_t s2 = ctx.processor_mic_buffer[i * 2 + 1];
         if (do_dc) {
-          int32_t inp2 = (int32_t) s2 << 16;
-          int32_t out2 = inp2 - this->dc_prev_input_secondary_persistent_ +
-                         this->dc_prev_output_secondary_persistent_ -
-                         (this->dc_prev_output_secondary_persistent_ >> 10);
-          this->dc_prev_input_secondary_persistent_ = inp2;
-          this->dc_prev_output_secondary_persistent_ = out2;
-          s2 = static_cast<int16_t>(out2 >> 16);
+          s2 = this->dc_secondary_.process(s2);
         }
         if (do_input_gain_boost) {
           s2 = scale_sample(s2, boost);

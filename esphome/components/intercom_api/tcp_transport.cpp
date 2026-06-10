@@ -15,6 +15,7 @@
 #include "../audio_processor/log_utils.h"
 #include "../audio_processor/scoped_lock.h"
 #include "../audio_processor/task_utils.h"
+#include "net_utils.h"
 
 namespace esphome {
 namespace intercom_api {
@@ -40,38 +41,10 @@ void set_blocking_mode(int socket, bool blocking) {
 void configure_client_socket(int socket) {
   int opt = 1;
   setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-  struct timeval tv{};
-  tv.tv_sec = kSocketIoTimeoutMs / 1000;
-  tv.tv_usec = (kSocketIoTimeoutMs % 1000) * 1000;
+  struct timeval tv = make_timeval_ms(kSocketIoTimeoutMs);
   setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-  // The server task uses select() before recv(), and intercom_tx is not the
-  // realtime I2S task. Blocking send with a bounded timeout avoids short TCP
-  // writes splitting a framed audio packet under Wi-Fi/media backpressure.
   set_blocking_mode(socket, true);
-}
-
-bool wait_socket_writable(int socket, uint32_t wait_ms) {
-  fd_set wfds;
-  FD_ZERO(&wfds);
-  FD_SET(socket, &wfds);
-  struct timeval tv{};
-  tv.tv_sec = wait_ms / 1000;
-  tv.tv_usec = (wait_ms % 1000) * 1000;
-  int ready = select(socket + 1, nullptr, &wfds, nullptr, &tv);
-  return ready > 0 && FD_ISSET(socket, &wfds);
-}
-
-bool wait_socket_readable(int socket, uint32_t wait_ms) {
-  if (socket < 0) return false;
-  fd_set rfds;
-  FD_ZERO(&rfds);
-  FD_SET(socket, &rfds);
-  struct timeval tv{};
-  tv.tv_sec = wait_ms / 1000;
-  tv.tv_usec = (wait_ms % 1000) * 1000;
-  int ready = select(socket + 1, &rfds, nullptr, nullptr, &tv);
-  return ready > 0 && FD_ISSET(socket, &rfds);
 }
 
 }  // namespace
@@ -173,7 +146,11 @@ void TcpTransport::stop() {
   // Wake the server task and wait for its explicit done signal before freeing
   // a possible PSRAM stack while the task may still be inside lwIP/select.
   if (wait_for_server) {
-    xTaskNotifyGive(this->server_task_handle_);
+    this->close_server_socket_();
+    int client_fd = this->client_.socket.load(std::memory_order_acquire);
+    if (client_fd >= 0) {
+      shutdown(client_fd, SHUT_RDWR);
+    }
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(300)) == 0) {
       ESP_LOGE(TAG, "server_task did not stop within 300ms; leaking stack to avoid UAF");
     }
@@ -231,15 +208,6 @@ void TcpTransport::server_task_() {
   }
 
   while (this->running_.load(std::memory_order_acquire)) {
-    // Streaming: poll non-blocking. Idle: park up to 100 ms for a wake.
-    if (this->client_.streaming.load(std::memory_order_acquire)) {
-      ulTaskNotifyTake(pdTRUE, 0);
-    } else {
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
-    }
-
-    if (!this->running_.load(std::memory_order_acquire)) break;
-
     if (this->server_socket_ < 0) {
       if (!this->setup_server_socket_()) {
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -247,32 +215,60 @@ void TcpTransport::server_task_() {
       }
     }
 
-    // Always drain pending inbound connections. Even while this node already
-    // owns an active call leg, a new caller deserves a protocol-level
-    // DECLINE("busy") instead of connecting successfully and waiting forever
-    // in OUTGOING.
-    this->accept_client_();
-
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    int server_fd = this->server_socket_;
+    int max_fd = server_fd;
+    FD_SET(server_fd, &read_fds);
     int client_fd = this->client_.socket.load(std::memory_order_acquire);
     if (client_fd >= 0) {
-      fd_set read_fds;
-      FD_ZERO(&read_fds);
       FD_SET(client_fd, &read_fds);
-      struct timeval tv = {.tv_sec = 0, .tv_usec = 10000};  // 10 ms
+      if (client_fd > max_fd) max_fd = client_fd;
+    }
+    timeval tv = make_timeval_ms(PING_INTERVAL_MS);
+    int ret = ::select(max_fd + 1, &read_fds, nullptr, nullptr, &tv);
+    if (!this->running_.load(std::memory_order_acquire)) break;
+    if (ret < 0) {
+      if (errno != EINTR) ESP_LOGW(TAG, "TCP select error: %d", errno);
+      this->close_server_socket_();
+      continue;
+    }
 
-      int ret = ::select(client_fd + 1, &read_fds, nullptr, nullptr, &tv);
-      if (ret > 0 && FD_ISSET(client_fd, &read_fds)) {
+    if (ret > 0 && this->server_socket_ == server_fd && FD_ISSET(server_fd, &read_fds)) {
+      this->accept_client_();
+    }
+
+    client_fd = this->client_.socket.load(std::memory_order_acquire);
+    if (ret > 0 && client_fd >= 0 && FD_ISSET(client_fd, &read_fds)) {
+      while (this->running_.load(std::memory_order_acquire)) {
+        uint8_t peek = 0;
+        ssize_t ready = recv(client_fd, &peek, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (ready == 0) {
+          ESP_LOGI(TAG, "Client disconnected");
+          this->close_client_socket_and_notify_();
+          break;
+        }
+        if (ready < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+          ESP_LOGW(TAG, "TCP recv peek error: %d", errno);
+          this->close_client_socket_and_notify_();
+          break;
+        }
         MessageHeader header;
         if (this->receive_message_(client_fd, header, this->rx_buffer_, MAX_MESSAGE_SIZE)) {
           this->dispatch_message_(header, this->rx_buffer_ + HEADER_SIZE);
+          client_fd = this->client_.socket.load(std::memory_order_acquire);
+          if (client_fd < 0) break;
         } else {
           ESP_LOGI(TAG, "Client disconnected");
           this->close_client_socket_and_notify_();
+          break;
         }
       }
+    }
 
-      // Catch half-open sockets (NAT timeout, silent peer crash) that
-      // recv() never errors on.
+    client_fd = this->client_.socket.load(std::memory_order_acquire);
+    if (client_fd >= 0) {
       uint32_t silence = millis() - this->client_.last_inbound_ms;
       if (silence > KEEPALIVE_DEADLINE_MS) {
         ESP_LOGW(TAG, "TCP peer silent for %u ms, closing dead connection",
@@ -288,8 +284,6 @@ void TcpTransport::server_task_() {
         this->client_.last_ping_sent_ms = millis();
       }
     }
-
-    vTaskDelay(1);
   }
 
   ESP_LOGD(TAG, "Server task exiting");
@@ -366,102 +360,104 @@ void TcpTransport::close_client_socket_and_notify_() {
 }
 
 void TcpTransport::accept_client_() {
-  struct sockaddr_in client_addr;
-  socklen_t client_len = sizeof(client_addr);
+  while (true) {
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
 
-  int client_sock = accept(this->server_socket_,
-                           reinterpret_cast<struct sockaddr *>(&client_addr),
-                           &client_len);
-  if (client_sock < 0) {
-    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-      ESP_LOGW(TAG, "Accept error: %d", errno);
+    int client_sock = accept(this->server_socket_,
+                             reinterpret_cast<struct sockaddr *>(&client_addr),
+                             &client_len);
+    if (client_sock < 0) {
+      if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        ESP_LOGW(TAG, "Accept error: %d", errno);
+      }
+      return;
     }
-    return;
-  }
 
-  configure_client_socket(client_sock);
+    configure_client_socket(client_sock);
 
-  // Read MSG_START before deciding accept/reject: a wire-correct DECLINE
-  // must echo the caller's call_id back.
-  MessageHeader hello_header;
-  if (!this->receive_message_(client_sock, hello_header,
-                              this->rx_buffer_, MAX_MESSAGE_SIZE)) {
-    ESP_LOGD(TAG, "Client closed before MSG_START");
-    close(client_sock);
-    return;
-  }
-
-  if (hello_header.type != static_cast<uint8_t>(MessageType::START)) {
-    ESP_LOGW(TAG, "Expected MSG_START, got type=0x%02x", hello_header.type);
-    close(client_sock);
-    return;
-  }
-
-  std::string incoming_cid;
-  if (decode_call_id_prefix(this->rx_buffer_ + HEADER_SIZE,
-                            hello_header.length, &incoming_cid) == 0) {
-    ESP_LOGW(TAG, "Malformed MSG_START body (no call_id prefix)");
-    close(client_sock);
-    return;
-  }
-
-  auto reject = [&](const char *what) {
-    ESP_LOGW(TAG, "Rejecting connection - %s (cid='%s')", what, incoming_cid.c_str());
-
-    // DECLINE body: [call_id_len:u8][call_id][reason_len:u8][reason].
-    static constexpr char kBusyReason[] = "busy";
-    constexpr size_t kReasonLen = sizeof(kBusyReason) - 1;
-    const std::string busy_reason(kBusyReason, kReasonLen);
-
-    uint8_t body[1 + INTERCOM_MAX_CALL_ID_LEN + 1 + INTERCOM_MAX_REASON_LEN];
-    size_t off = encode_call_id_prefix(body, sizeof(body), incoming_cid);
-    if (off == 0) { close(client_sock); return; }
-    size_t n = encode_lp_string(body + off, sizeof(body) - off,
-                                busy_reason, INTERCOM_MAX_REASON_LEN);
-    if (n == 0) { close(client_sock); return; }
-    off += n;
-
-    this->send_message_(client_sock, MessageType::DECLINE, body, off);
-    close(client_sock);
-  };
-
-  if (this->client_.socket.load(std::memory_order_acquire) >= 0) {
-    reject("already have client");
-    return;
-  }
-
-  if (!this->should_accept_session_()) {
-    reject("upper layer rejected (FSM busy)");
-    return;
-  }
-
-  char ip_str[INET_ADDRSTRLEN];
-  inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
-  ESP_LOGI(TAG, "Client connected from %s", ip_str);
-
-  // Re-check under lock: originate() on Core 1 races with accept here.
-  bool adopted = false;
-  {
-    audio_processor::ScopedLock lock(this->client_mutex_);
-    if (this->client_.socket.load(std::memory_order_acquire) < 0) {
-      this->client_.socket.store(client_sock, std::memory_order_release);
-      this->client_.addr = client_addr;
-      this->client_.last_inbound_ms = millis();
-      this->client_.last_ping_sent_ms = millis();
-      this->client_.streaming.store(false, std::memory_order_release);
-      adopted = true;
+    // Read MSG_START before deciding accept/reject: a wire-correct DECLINE
+    // must echo the caller's call_id back.
+    MessageHeader hello_header;
+    if (!this->receive_message_(client_sock, hello_header,
+                                this->rx_buffer_, MAX_MESSAGE_SIZE)) {
+      ESP_LOGD(TAG, "Client closed before MSG_START");
+      close(client_sock);
+      continue;
     }
-  }
-  if (!adopted) {
-    reject("active leg appeared while accepting");
-    return;
-  }
 
-  this->emit_connection_change_(true);
+    if (hello_header.type != static_cast<uint8_t>(MessageType::START)) {
+      ESP_LOGW(TAG, "Expected MSG_START, got type=0x%02x", hello_header.type);
+      close(client_sock);
+      continue;
+    }
 
-  // Forward the MSG_START we already consumed; on_connection_change(true)
-  // above ran first so the FSM sees "connected" before processing START.
-  this->dispatch_message_(hello_header, this->rx_buffer_ + HEADER_SIZE);
+    std::string incoming_cid;
+    if (decode_call_id_prefix(this->rx_buffer_ + HEADER_SIZE,
+                              hello_header.length, &incoming_cid) == 0) {
+      ESP_LOGW(TAG, "Malformed MSG_START body (no call_id prefix)");
+      close(client_sock);
+      continue;
+    }
+
+    auto reject = [&](const char *what) {
+      ESP_LOGW(TAG, "Rejecting connection - %s (cid='%s')", what, incoming_cid.c_str());
+
+      // DECLINE body: [call_id_len:u8][call_id][reason_len:u8][reason].
+      static constexpr char kBusyReason[] = "busy";
+      constexpr size_t kReasonLen = sizeof(kBusyReason) - 1;
+      const std::string busy_reason(kBusyReason, kReasonLen);
+
+      uint8_t body[1 + INTERCOM_MAX_CALL_ID_LEN + 1 + INTERCOM_MAX_REASON_LEN];
+      size_t off = encode_call_id_prefix(body, sizeof(body), incoming_cid);
+      if (off == 0) { close(client_sock); return; }
+      size_t n = encode_lp_string(body + off, sizeof(body) - off,
+                                  busy_reason, INTERCOM_MAX_REASON_LEN);
+      if (n == 0) { close(client_sock); return; }
+      off += n;
+
+      this->send_message_(client_sock, MessageType::DECLINE, body, off);
+      close(client_sock);
+    };
+
+    if (this->client_.socket.load(std::memory_order_acquire) >= 0) {
+      reject("already have client");
+      continue;
+    }
+
+    if (!this->should_accept_session_()) {
+      reject("upper layer rejected (FSM busy)");
+      continue;
+    }
+
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
+    ESP_LOGI(TAG, "Client connected from %s", ip_str);
+
+    // Re-check under lock: originate() on Core 1 races with accept here.
+    bool adopted = false;
+    {
+      audio_processor::ScopedLock lock(this->client_mutex_);
+      if (this->client_.socket.load(std::memory_order_acquire) < 0) {
+        this->client_.socket.store(client_sock, std::memory_order_release);
+        this->client_.addr = client_addr;
+        this->client_.last_inbound_ms = millis();
+        this->client_.last_ping_sent_ms = millis();
+        this->client_.streaming.store(false, std::memory_order_release);
+        adopted = true;
+      }
+    }
+    if (!adopted) {
+      reject("active leg appeared while accepting");
+      continue;
+    }
+
+    this->emit_connection_change_(true);
+
+    // Forward the MSG_START we already consumed; on_connection_change(true)
+    // above ran first so the FSM sees "connected" before processing START.
+    this->dispatch_message_(hello_header, this->rx_buffer_ + HEADER_SIZE);
+  }
 }
 
 bool TcpTransport::originate(const std::string &host, uint16_t port) {
@@ -557,9 +553,7 @@ bool TcpTransport::originate(const std::string &host, uint16_t port) {
     return false;
   }
 
-  if (this->server_task_handle_ != nullptr) {
-    xTaskNotifyGive(this->server_task_handle_);
-  }
+  this->close_server_socket_();
 
   this->emit_connection_change_(true);
   return true;

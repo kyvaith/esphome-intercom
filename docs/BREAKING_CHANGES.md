@@ -1,5 +1,27 @@
 # Breaking changes
 
+## 2026.6.3: dedicated binary browser-audio socket
+
+The Lovelace card no longer sends or receives audio through Home Assistant's
+shared frontend WebSocket as JSON/base64 messages. Browser audio now uses the
+authenticated `/api/intercom_native/ws` WebSocket endpoint with binary PCM
+frames that match the ESP wire chunk size.
+
+Removed legacy card audio commands:
+
+| Removed command | Replacement |
+|---|---|
+| `intercom_native/audio` | Binary `AUDIO` frame on `/api/intercom_native/ws` |
+| `intercom_native/subscribe_audio` | Session-bound `/api/intercom_native/ws` connection |
+
+The integration serves the card and backend together, so HACS upgrades remain
+atomic. Custom clients that used the old JSON/base64 WebSocket commands must
+move to the binary endpoint before upgrading.
+
+The server now owns softphone teardown. If the browser tab, Companion App view
+or WebSocket disappears, Home Assistant stops the bound intercom session and
+hangs up the ESP leg instead of waiting for client-side cleanup.
+
 ## 2026.6.2: HA softphone and full-device runtime cleanup
 
 `2026.6.2` documents only changes from `2026.6.1`. The PBX-lite phonebook

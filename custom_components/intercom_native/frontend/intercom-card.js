@@ -1,3 +1,5 @@
+import { intercomEngine } from "./intercom-engine.js";
+
 /**
  * Intercom Card v2.0.0 - Pure mirror of ESP state
  *
@@ -50,17 +52,6 @@ class IntercomCard extends HTMLElement {
     this._softphoneStateLoaded = false;
     this._softphoneStateLoading = false;
 
-    // Browser audio path (active when the card itself is the call origin).
-    this._audioContext = null;
-    this._mediaStream = null;
-    this._workletNode = null;
-    this._source = null;
-    this._playbackContext = null;
-    this._gainNode = null;
-    this._nextPlayTime = 0;
-    this._unsubscribeAudio = null;
-    this._chunksSent = 0;
-    this._chunksReceived = 0;
     this._cleanupTask = null;
 
     // Device info
@@ -80,9 +71,6 @@ class IntercomCard extends HTMLElement {
     this._nextButtonEntityId = null;
     this._callButtonEntityId = null;
     this._declineButtonEntityId = null;
-
-    // Audio streaming active (for P2P)
-    this._audioStreaming = false;
 
     // Persistent error message (survives _render() DOM rebuild)
     this._errorMsg = "";
@@ -106,10 +94,12 @@ class IntercomCard extends HTMLElement {
     // strings (peer, destination, caller, decline reason).
     this._els = null;
     this._skeletonMode = null;  // 'main' | 'unconfigured' | null
+    this._engineListener = () => this._render();
   }
 
   connectedCallback() {
     if (this._hass) this._subscribeBusEvents();
+    intercomEngine.addEventListener("state", this._engineListener);
   }
 
   disconnectedCallback() {
@@ -125,7 +115,7 @@ class IntercomCard extends HTMLElement {
       clearTimeout(this._availableDevicesRetryTimer);
       this._availableDevicesRetryTimer = null;
     }
-    this._cleanup();
+    intercomEngine.removeEventListener("state", this._engineListener);
   }
 
   async _subscribeBusEvents() {
@@ -321,15 +311,8 @@ class IntercomCard extends HTMLElement {
   }
 
   _hasBrowserAudioPath() {
-    return !!(
-      this._audioStreaming ||
-      this._mediaStream ||
-      this._workletNode ||
-      this._source ||
-      this._audioContext ||
-      this._playbackContext ||
-      this._unsubscribeAudio
-    );
+    const id = this._sessionDeviceId();
+    return intercomEngine.active && (!id || intercomEngine.deviceId === id);
   }
 
   _cleanupAfterTerminalSession() {
@@ -337,7 +320,7 @@ class IntercomCard extends HTMLElement {
     this._starting = false;
     this._stopping = false;
     if (!this._hasBrowserAudioPath() || this._cleanupTask) return;
-    this._cleanupTask = this._cleanup()
+    this._cleanupTask = intercomEngine.close("terminal")
       .catch((err) => console.warn("intercom-card: softphone cleanup failed", err))
       .finally(() => {
         this._cleanupTask = null;
@@ -455,6 +438,7 @@ class IntercomCard extends HTMLElement {
   set hass(hass) {
     const oldHass = this._hass;
     this._hass = hass;
+    intercomEngine.configure(hass);
 
     // Devices populate the destination cycler.
     if (hass && this._availableDevices.length === 0) {
@@ -543,8 +527,8 @@ class IntercomCard extends HTMLElement {
 
       // CRITICAL: Cleanup audio when ESP goes to Idle
       if (espStateChanged && newEspState === "idle") {
-        if (this._audioStreaming && !this._starting) {
-          this._cleanup();
+        if (this._hasBrowserAudioPath() && !this._starting) {
+          intercomEngine.close("esp_idle");
         }
         this._errorMsg = "";
         this._autoAnswering = false;
@@ -1125,8 +1109,8 @@ class IntercomCard extends HTMLElement {
     }
 
     // Stats line
-    if (this._audioStreaming) {
-      els.stats.textContent = `Sent: ${this._chunksSent} | Recv: ${this._chunksReceived}`;
+    if (this._hasBrowserAudioPath()) {
+      els.stats.textContent = intercomEngine.statsText();
     } else {
       els.stats.textContent = this._formatModeLabel(destination);
     }
@@ -1547,59 +1531,8 @@ class IntercomCard extends HTMLElement {
     }
   }
 
-  async _setupMicAndSpeaker(deviceInfo) {
-    const mode = this._normaliseAudioMode(deviceInfo?.audio_mode);
-    const sendToEsp = mode === "full_duplex" || mode === "speaker_only";
-    const receiveFromEsp = mode === "full_duplex" || mode === "mic_only";
-
-    if (sendToEsp) {
-      this._mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-      });
-
-      const track = this._mediaStream.getAudioTracks()[0];
-      const trackSampleRate = track?.getSettings?.().sampleRate;
-      this._audioContext = new (window.AudioContext || window.webkitAudioContext)(
-        trackSampleRate ? { sampleRate: trackSampleRate } : undefined
-      );
-      if (this._audioContext.state === "suspended") await this._audioContext.resume();
-
-      this._source = this._audioContext.createMediaStreamSource(this._mediaStream);
-
-      await this._audioContext.audioWorklet.addModule(`/intercom-native/intercom-processor.js?v=${INTERCOM_CARD_VERSION}`);
-      this._workletNode = new AudioWorkletNode(this._audioContext, "intercom-processor");
-      this._workletNode.port.onmessage = (e) => {
-        if (e.data.type === "audio") this._sendAudio(new Int16Array(e.data.buffer));
-      };
-      this._source.connect(this._workletNode);
-    }
-
-    if (receiveFromEsp) {
-      this._playbackContext = new (window.AudioContext || window.webkitAudioContext)();
-      this._gainNode = this._playbackContext.createGain();
-      this._gainNode.gain.value = 1.0;
-      this._gainNode.connect(this._playbackContext.destination);
-    }
-  }
-
   async _startP2P(deviceInfo) {
-    await this._setupMicAndSpeaker(deviceInfo);
-
-    const result = await this._hass.connection.sendMessagePromise({
-      type: "intercom_native/start",
-      device_id: deviceInfo.device_id,
-      host: deviceInfo.host,
-    });
-    if (!result.success) throw new Error("Start failed");
-
-    this._unsubscribeAudio = await this._hass.connection.subscribeMessage(
-      (msg) => this._handleAudioMessage(msg),
-      { type: "intercom_native/subscribe_audio", device_id: deviceInfo.device_id }
-    );
-
-    this._audioStreaming = true;
-    this._chunksSent = 0;
-    this._chunksReceived = 0;
+    await intercomEngine.startP2P(deviceInfo);
   }
 
   async _startHaSoftphoneCall(softphoneInfo) {
@@ -1624,25 +1557,13 @@ class IntercomCard extends HTMLElement {
     this._render();
 
     try {
-      await this._setupMicAndSpeaker(sessionInfo);
-      const result = await this._hass.connection.sendMessagePromise({
-        type: "intercom_native/ha_softphone_start",
-        target_device_id: target.device_id,
-      });
-      if (!result?.success) throw new Error("Start failed");
-      this._sessionState = result.state === "ringing" ? "outgoing" : (result.state || "calling");
-      this._destRinging = result.state === "ringing";
+      await intercomEngine.startHaSoftphone(target, sessionInfo);
+      this._sessionState = "calling";
+      this._destRinging = false;
       this._sessionCaller = target.name || "";
-      this._unsubscribeAudio = await this._hass.connection.subscribeMessage(
-        (msg) => this._handleAudioMessage(msg),
-        { type: "intercom_native/subscribe_audio", device_id: HA_SOFTPHONE_DEVICE_ID }
-      );
-      this._audioStreaming = true;
-      this._chunksSent = 0;
-      this._chunksReceived = 0;
     } catch (err) {
       this._showError(err.message || String(err));
-      await this._cleanup();
+      await intercomEngine.close("start_error");
     } finally {
       this._starting = false;
       this._render();
@@ -1650,23 +1571,7 @@ class IntercomCard extends HTMLElement {
   }
 
   async _answerEspCall(deviceInfo) {
-    await this._setupMicAndSpeaker(deviceInfo);
-
-    const result = await this._hass.connection.sendMessagePromise({
-      type: "intercom_native/answer_esp_call",
-      device_id: deviceInfo.device_id,
-      host: deviceInfo.host,
-    });
-    if (!result.success) throw new Error("Answer failed");
-
-    this._unsubscribeAudio = await this._hass.connection.subscribeMessage(
-      (msg) => this._handleAudioMessage(msg),
-      { type: "intercom_native/subscribe_audio", device_id: deviceInfo.device_id }
-    );
-
-    this._audioStreaming = true;
-    this._chunksSent = 0;
-    this._chunksReceived = 0;
+    await intercomEngine.answerEspCall(deviceInfo);
   }
 
   async _startBridge(sourceDevice, destinationName) {
@@ -1716,19 +1621,7 @@ class IntercomCard extends HTMLElement {
         this._activeDeviceInfo = sessionInfo;
         this._activeSessionDeviceId = sessionDeviceId;
         this._callMode = "softphone";
-        await this._setupMicAndSpeaker(sessionInfo);
-        const res = await this._hass.connection.sendMessagePromise({
-          type: "intercom_native/answer",
-          device_id: sessionDeviceId,
-        });
-        if (!res?.success) throw new Error("Answer failed");
-        this._unsubscribeAudio = await this._hass.connection.subscribeMessage(
-          (msg) => this._handleAudioMessage(msg),
-          { type: "intercom_native/subscribe_audio", device_id: sessionDeviceId }
-        );
-        this._audioStreaming = true;
-        this._chunksSent = 0;
-        this._chunksReceived = 0;
+        await intercomEngine.answer(sessionInfo, sessionDeviceId);
         return;
       }
 
@@ -1756,7 +1649,7 @@ class IntercomCard extends HTMLElement {
       }
     } catch (err) {
       this._showError(err.message || String(err));
-      await this._cleanup();
+      await intercomEngine.close("answer_error");
     } finally {
       this._starting = false;
       this._render();
@@ -1804,10 +1697,7 @@ class IntercomCard extends HTMLElement {
       this._activeDeviceInfo = deviceInfo;
 
       if (this._isSoftphoneContext()) {
-        await this._hass.connection.sendMessagePromise({
-          type: "intercom_native/stop",
-          device_id: this._sessionDeviceId(),
-        });
+        await intercomEngine.stop(this._sessionDeviceId());
       } else {
         // Mirror mode: Hangup is the ESP's Decline button. Firmware maps
         // Decline during STREAMING to stop(), and idle is a no-op.
@@ -1821,24 +1711,16 @@ class IntercomCard extends HTMLElement {
       this._showError(err.message || String(err));
     }
 
-    await this._cleanup();
+    await intercomEngine.close("hangup");
     this._stopping = false;
     this._render();
   }
 
   async _cleanup() {
     const wasSoftphone = this._isSoftphoneContext();
-    if (this._unsubscribeAudio) { this._unsubscribeAudio(); this._unsubscribeAudio = null; }
-    if (this._mediaStream) { this._mediaStream.getTracks().forEach(t => t.stop()); this._mediaStream = null; }
-    if (this._workletNode) { this._workletNode.disconnect(); this._workletNode = null; }
-    if (this._source) { this._source.disconnect(); this._source = null; }
-    if (this._audioContext) { await this._audioContext.close().catch(() => {}); this._audioContext = null; }
-    if (this._playbackContext) { await this._playbackContext.close().catch(() => {}); this._playbackContext = null; }
-    this._gainNode = null;
-    this._nextPlayTime = 0;
+    await intercomEngine.close("card_cleanup");
     this._activeDeviceInfo = null;
     this._callMode = null;
-    this._audioStreaming = false;
     if (wasSoftphone) {
       this._sessionState = null;
       this._sessionCaller = "";
@@ -1968,69 +1850,6 @@ class IntercomCard extends HTMLElement {
       console.error("Failed to get device info:", err);
     }
     return null;
-  }
-
-  _sendAudio(int16Array) {
-    if (!this._audioStreaming || !this._activeDeviceInfo) return;
-    const bytes = new Uint8Array(
-      int16Array.buffer,
-      int16Array.byteOffset,
-      int16Array.byteLength
-    );
-    let binary = "";
-    for (let i = 0; i < bytes.length; i += 0x8000) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 0x8000, bytes.length)));
-    }
-    this._hass.connection.sendMessage({
-      type: "intercom_native/audio",
-      device_id: this._activeDeviceInfo.device_id,
-      audio: btoa(binary),
-    });
-    this._chunksSent++;
-    if (this._chunksSent % 25 === 0) this._updateStats();
-  }
-
-  _handleAudioMessage(msg) {
-    if (!msg || !this._activeDeviceInfo) return;
-    if (msg.device_id !== this._activeDeviceInfo.device_id) return;
-    if (!this._audioStreaming || !this._playbackContext) return;
-
-    this._chunksReceived++;
-    if (this._chunksReceived % 50 === 0) this._updateStats();
-
-    try {
-      const binary = atob(msg.audio);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-      const int16 = new Int16Array(bytes.buffer);
-      const float32 = new Float32Array(int16.length);
-      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
-
-      this._playScheduled(float32);
-    } catch (err) { _ic_log.debug("intercom: audio error", err); }
-  }
-
-  _playScheduled(float32) {
-    if (!this._playbackContext || !this._gainNode) return;
-    try {
-      const buffer = this._playbackContext.createBuffer(1, float32.length, 16000);
-      buffer.getChannelData(0).set(float32);
-      const now = this._playbackContext.currentTime;
-      if (this._nextPlayTime < now) this._nextPlayTime = now + 0.01;
-      if (this._nextPlayTime - now > 0.2) { this._nextPlayTime = now + 0.02; return; }
-      const src = this._playbackContext.createBufferSource();
-      src.buffer = buffer;
-      src.connect(this._gainNode);
-      src.start(this._nextPlayTime);
-      this._nextPlayTime += buffer.duration;
-    } catch (err) { _ic_log.debug("intercom: audio error", err); }
-  }
-
-  _updateStats() {
-    if (this._els?.stats && this._audioStreaming) {
-      this._els.stats.textContent = `Sent: ${this._chunksSent} | Recv: ${this._chunksReceived}`;
-    }
   }
 
   _showError(msg) {

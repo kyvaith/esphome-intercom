@@ -13,31 +13,20 @@
 #include "esphome/core/log.h"
 #include "../audio_processor/log_utils.h"
 #include "../audio_processor/task_utils.h"
+#include "net_utils.h"
 
 namespace esphome {
 namespace intercom_api {
 
 static const char *const TAG = "intercom_api.udp";
 
-static bool wait_socket_readable_(int socket, uint32_t timeout_ms) {
-  if (socket < 0) return false;
-
-  fd_set read_fds;
-  FD_ZERO(&read_fds);
-  FD_SET(socket, &read_fds);
-
-  struct timeval tv;
-  tv.tv_sec = timeout_ms / 1000;
-  tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-  const int ret = select(socket + 1, &read_fds, nullptr, nullptr, &tv);
-  if (ret > 0) {
-    return FD_ISSET(socket, &read_fds);
-  }
-  if (ret < 0 && errno != EINTR) {
-    ESP_LOGW(TAG, "UDP select error on socket %d: %d", socket, errno);
-  }
-  return false;
+static void wake_udp_socket(int socket, uint16_t port) {
+  if (socket < 0 || port == 0) return;
+  struct sockaddr_in dst{};
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(port);
+  dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  sendto(socket, nullptr, 0, MSG_DONTWAIT, reinterpret_cast<struct sockaddr *>(&dst), sizeof(dst));
 }
 
 UdpTransport::UdpTransport(uint16_t listen_port, std::string remote_ip,
@@ -198,6 +187,7 @@ void UdpTransport::stop_audio_path() {
   }
 
   if (wait_for_recv) {
+    wake_udp_socket(this->audio_socket_, this->listen_port_);
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(300)) == 0) {
       ESP_LOGE(TAG, "recv_task did not stop within 300ms; leaking stack to avoid UAF");
     }
@@ -232,6 +222,7 @@ void UdpTransport::stop() {
   this->active_.store(false, std::memory_order_release);
 
   if (wait_for_ctrl) {
+    wake_udp_socket(this->control_socket_, this->control_port_);
     if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(300)) == 0) {
       ESP_LOGE(TAG, "ctrl_task did not stop within 300ms; leaking stack to avoid UAF");
     }
@@ -358,8 +349,12 @@ void UdpTransport::recv_task_() {
 
   while (this->running_.load(std::memory_order_acquire) &&
          this->audio_active_.load(std::memory_order_acquire)) {
-    if (!wait_socket_readable_(this->audio_socket_, 20)) {
+    if (!wait_socket_readable(this->audio_socket_, PING_INTERVAL_MS)) {
       continue;
+    }
+    if (!this->running_.load(std::memory_order_acquire) ||
+        !this->audio_active_.load(std::memory_order_acquire)) {
+      break;
     }
 
     struct sockaddr_in src;
@@ -397,8 +392,11 @@ void UdpTransport::ctrl_task_() {
   uint8_t rx[HEADER_SIZE + MAX_AUDIO_CHUNK + 64];
 
   while (this->running_.load(std::memory_order_acquire)) {
-    if (!wait_socket_readable_(this->control_socket_, 100)) {
+    if (!wait_socket_readable(this->control_socket_, PING_INTERVAL_MS)) {
       continue;
+    }
+    if (!this->running_.load(std::memory_order_acquire)) {
+      break;
     }
 
     struct sockaddr_in src;

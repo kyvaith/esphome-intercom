@@ -40,9 +40,22 @@ def _load_intercom_module(name: str):
 const = _load_intercom_module("const")
 protocol = _load_intercom_module("protocol")
 fsm = _load_intercom_module("fsm")
+audio_ws = _load_intercom_module("audio_ws")
 
 
 class IntercomProtocolFixturesTest(unittest.TestCase):
+    def test_binary_audio_frame_round_trip(self) -> None:
+        payload = bytes((i & 0xFF) for i in range(audio_ws.AUDIO_CHUNK_BYTES))
+        frame = audio_ws.encode_audio_frame(payload)
+        self.assertEqual(frame[0], audio_ws.AUDIO_FRAME_TYPE)
+        self.assertEqual(audio_ws.decode_audio_frame(frame), payload)
+
+    def test_binary_audio_frame_rejects_wrong_shape(self) -> None:
+        with self.assertRaises(ValueError):
+            audio_ws.encode_audio_frame(b"short")
+        with self.assertRaises(ValueError):
+            audio_ws.decode_audio_frame(bytes((audio_ws.AUDIO_FRAME_TYPE + 1,)) + (b"\0" * audio_ws.AUDIO_CHUNK_BYTES))
+
     def test_ping_frame_fixture(self) -> None:
         body = protocol.build_call_id_only_body("")
         self.assertEqual(protocol.build_frame(const.MSG_PING, body).hex(), "04010000")

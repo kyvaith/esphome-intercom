@@ -3,7 +3,6 @@
 #ifdef USE_ESP32
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -33,25 +32,13 @@ void IntercomApi::debug_log_pcm_level_(const char *label, const uint8_t *pcm, si
     return;
   }
 
-  const int16_t *data = reinterpret_cast<const int16_t *>(pcm);
-  uint64_t sum_sq = 0;
-  uint32_t peak = 0;
-  for (size_t i = 0; i < samples; i++) {
-    const int32_t sample = data[i];
-    const uint32_t abs_sample = sample == INT16_MIN ? 32768U : static_cast<uint32_t>(std::abs(sample));
-    if (abs_sample > peak)
-      peak = abs_sample;
-    sum_sq += static_cast<int64_t>(sample) * static_cast<int64_t>(sample);
-  }
-
-  const float rms = std::sqrt(static_cast<float>(sum_sq) / static_cast<float>(samples));
-  const float peak_db = peak > 0 ? 20.0f * std::log10(static_cast<float>(peak) / 32768.0f) : -120.0f;
-  const float rms_db = rms > 0.0f ? 20.0f * std::log10(rms / 32768.0f) : -120.0f;
+  const auto levels = compute_levels_dbfs_i16(reinterpret_cast<const int16_t *>(pcm), samples);
   const char *path = "direct";
   ESP_LOGI(TAG,
            "AudioDebug[%s]: frames=%u bytes=%u samples=%u peak=%u peak_dbfs=%.1f rms_dbfs=%.1f "
            "intercom_volume=%.3f state=%s path=%s",
-           label, frame_count, (unsigned) bytes, (unsigned) samples, (unsigned) peak, peak_db, rms_db,
+           label, frame_count, (unsigned) bytes, (unsigned) samples, (unsigned) levels.peak,
+           levels.peak_dbfs, levels.rms_dbfs,
            this->volume_.load(std::memory_order_relaxed), this->get_call_state_str(), path);
 }
 
@@ -82,37 +69,8 @@ void IntercomApi::process_tx_chunk_(const uint8_t *audio_chunk) {
   this->send_chunk_(audio_chunk, AUDIO_CHUNK_BYTES);
 }
 
-bool IntercomApi::read_tx_chunk_(uint8_t *audio_chunk, const uint8_t **chunk_data, void **release_item) {
-  *chunk_data = nullptr;
-  *release_item = nullptr;
-
-  size_t acquired_len = 0;
-  void *acquired = this->mic_buffer_->receive_acquire(acquired_len, AUDIO_CHUNK_BYTES, 0);
-  if (acquired != nullptr && acquired_len == AUDIO_CHUNK_BYTES) {
-    *chunk_data = static_cast<const uint8_t *>(acquired);
-    *release_item = acquired;
-    return true;
-  }
-  if (acquired != nullptr) {
-    if (acquired_len > AUDIO_CHUNK_BYTES) {
-      this->mic_buffer_->receive_release(acquired);
-      return false;
-    }
-    std::memcpy(audio_chunk, acquired, acquired_len);
-    this->mic_buffer_->receive_release(acquired);
-    const size_t remaining = AUDIO_CHUNK_BYTES - acquired_len;
-    if (this->mic_buffer_->read(audio_chunk + acquired_len, remaining, 0) != remaining) {
-      return false;
-    }
-    *chunk_data = audio_chunk;
-    return true;
-  }
-
-  if (this->mic_buffer_->read(audio_chunk, AUDIO_CHUNK_BYTES, 0) != AUDIO_CHUNK_BYTES) {
-    return false;
-  }
-  *chunk_data = audio_chunk;
-  return true;
+bool IntercomApi::read_tx_chunk_(uint8_t *audio_chunk) {
+  return this->mic_buffer_->read(audio_chunk, AUDIO_CHUNK_BYTES, 0) == AUDIO_CHUNK_BYTES;
 }
 
 void IntercomApi::tx_task_() {
@@ -129,22 +87,16 @@ void IntercomApi::tx_task_() {
     uint8_t burst = 0;
     while (this->is_tx_stream_ready_() && this->mic_buffer_->available() >= AUDIO_CHUNK_BYTES &&
            burst < MAX_TX_BURST) {
-      const uint8_t *chunk_data = nullptr;
-      void *release_item = nullptr;
-      if (!this->read_tx_chunk_(audio_chunk, &chunk_data, &release_item)) {
+      if (!this->read_tx_chunk_(audio_chunk)) {
         break;
       }
-      this->process_tx_chunk_(chunk_data);
-      if (release_item != nullptr) {
-        this->mic_buffer_->receive_release(release_item);
-      }
+      this->process_tx_chunk_(audio_chunk);
       burst++;
     }
 
-    if (burst == 0) {
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
-    } else if (burst >= MAX_TX_BURST) {
-      vTaskDelay(1);
+    if (burst < MAX_TX_BURST) {
+      // Producer notifies after every write; a give after this task's last take stays pending.
+      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
   }
 }
@@ -179,11 +131,7 @@ void IntercomApi::on_microphone_data_(const uint8_t *data, size_t len) {
       const size_t chunk = std::min(total_samples - off, kMicConvertedSamples);
       if (this->dc_offset_removal_) {
         for (size_t i = 0; i < chunk; i++) {
-          int32_t s = src[off + i];
-          // IIR HPF ~2.5 Hz @ 16 kHz (matches esp_audio_stack).
-          this->dc_offset_ += (s - this->dc_offset_) >> 10;
-          s = s - this->dc_offset_;
-          mic_converted[i] = scale_sample(static_cast<int16_t>(s), effective_gain);
+          mic_converted[i] = scale_sample(this->dc_blocker_.process(src[off + i]), effective_gain);
         }
       } else {
         scale_block_i16(src + off, mic_converted, chunk, effective_gain);

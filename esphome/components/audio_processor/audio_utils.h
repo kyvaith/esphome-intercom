@@ -12,7 +12,6 @@ namespace esphome {
 #define ESPHOME_SCALE_SAMPLE_DEFINED
 // Scale a 16-bit PCM sample by a float gain with saturation clamping.
 // Supports gains > 1.0 (amplification) unlike ESPHome's Q15 scale_audio_samples().
-// On ESP32-S3 (hardware FPU) this compiles to a single MADD.S instruction.
 static inline int16_t scale_sample(int16_t sample, float gain) {
   int32_t s = static_cast<int32_t>(sample * gain);
   if (s > 32767) return 32767;
@@ -90,6 +89,12 @@ static inline void scale_block_i16(const int16_t *in, int16_t *out, size_t len, 
 static constexpr float RMS_DBFS_OFFSET = 90.30899870f;
 static constexpr float RMS_DBFS_SILENCE = -120.0f;
 
+struct PcmLevelsDbfs {
+  uint32_t peak{0};
+  float peak_dbfs{RMS_DBFS_SILENCE};
+  float rms_dbfs{RMS_DBFS_SILENCE};
+};
+
 // RMS power in dBFS for int16 PCM samples. Returns -120 dBFS for silence.
 // `stride` lets callers walk channel-interleaved buffers (e.g. TDM slots).
 static inline float compute_rms_dbfs_i16(const int16_t *data, size_t samples, size_t stride = 1) {
@@ -102,6 +107,24 @@ static inline float compute_rms_dbfs_i16(const int16_t *data, size_t samples, si
   float mean = static_cast<float>(sumsq) / static_cast<float>(samples);
   if (mean <= 0.0f) return RMS_DBFS_SILENCE;
   return 10.0f * log10f(mean) - RMS_DBFS_OFFSET;
+}
+
+static inline PcmLevelsDbfs compute_levels_dbfs_i16(const int16_t *data, size_t samples, size_t stride = 1) {
+  PcmLevelsDbfs levels;
+  if (data == nullptr || samples == 0) return levels;
+  uint64_t sumsq = 0;
+  for (size_t i = 0; i < samples; i++) {
+    int32_t s = data[i * stride];
+    uint32_t abs_s = static_cast<uint32_t>(s < 0 ? -s : s);
+    if (abs_s > levels.peak) levels.peak = abs_s;
+    sumsq += static_cast<uint64_t>(s * s);
+  }
+  if (levels.peak > 0) {
+    levels.peak_dbfs = 20.0f * log10f(static_cast<float>(levels.peak) / 32768.0f);
+  }
+  float mean = static_cast<float>(sumsq) / static_cast<float>(samples);
+  if (mean > 0.0f) levels.rms_dbfs = 10.0f * log10f(mean) - RMS_DBFS_OFFSET;
+  return levels;
 }
 
 // Variant for int32 (e.g. TDM slot data with top 16 bits used). Each sample
@@ -118,5 +141,20 @@ static inline float compute_rms_dbfs_i32_top16(const int32_t *data, size_t sampl
   return 10.0f * log10f(mean) - RMS_DBFS_OFFSET;
 }
 #endif
+
+struct DcBlockerState {
+  int32_t prev_input_q16{0};
+  int32_t prev_output_q16{0};
+
+  // y[n]=x[n]-x[n-1]+(1-2^-10)y[n-1]; cutoff is about fs/(2*pi*1024).
+  inline int16_t process(int16_t sample) {
+    int32_t input = static_cast<int32_t>(sample) << 16;
+    int32_t output = input - this->prev_input_q16 + this->prev_output_q16 -
+                     (this->prev_output_q16 >> 10);
+    this->prev_input_q16 = input;
+    this->prev_output_q16 = output;
+    return static_cast<int16_t>(output >> 16);
+  }
+};
 
 }  // namespace esphome

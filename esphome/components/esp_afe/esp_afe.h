@@ -223,6 +223,7 @@ class EspAfe : public Component, public AudioProcessor {
 
   bool build_instance_(AfeInstance *instance);
   bool recreate_instance_(bool require_same_frame_sizes);
+  void clear_process_busy_();
   bool start_reconfigure_task_();
   static void reconfigure_task_trampoline_(void *arg);
   void reconfigure_task_loop_();
@@ -386,15 +387,13 @@ class EspAfe : public Component, public AudioProcessor {
   // the hot path. process() uses the drain protocol below instead.
   SemaphoreHandle_t config_mutex_{nullptr};
 
-  // Drain protocol for process() vs recreate_instance_:
-  //   recreate_instance_ sets drain_request_ = true and waits until
-  //   process_busy_ == false before touching instance state. process() marks
-  //   itself busy, then checks drain_request_; if set, it bails with
-  //   silence. This removes mutex overhead from the per-frame path while
-  //   preserving the invariant that process() never observes a
-  //   half-demolished instance.
+  // Drain protocol for process() vs recreate_instance_. The busy/request
+  // store-load pairs use seq_cst ordering; release/acquire on different
+  // atomics would allow both cores to observe false and enter teardown/process
+  // concurrently.
   std::atomic<bool> drain_request_{false};
   std::atomic<bool> process_busy_{false};
+  std::atomic<TaskHandle_t> process_drain_waiter_{nullptr};
 
   struct ReconfigureRequest {
     char mode[32]{};
@@ -420,6 +419,7 @@ class EspAfe : public Component, public AudioProcessor {
   std::atomic<float> output_rms_dbfs_{-120.0f};
   bool input_volume_sensor_enabled_{false};
   bool output_rms_sensor_enabled_{false};
+  uint8_t rms_sensor_divider_{0};
   int warmup_remaining_{3};
   // Feed/fetch diagnostics.
   std::atomic<uint32_t> input_ring_drop_{0}; // process() could not enqueue (NOSPLIT full)
@@ -440,6 +440,7 @@ class EspAfe : public Component, public AudioProcessor {
   std::atomic<uint32_t> fetch_us_max_{0};
   std::atomic<float> ringbuf_free_pct_{1.0f};
   std::atomic<uint32_t> frame_spec_revision_{0};
+  std::atomic<TaskHandle_t> pipeline_flush_waiter_{nullptr};
   // Tracks whether a microphone consumer wants the AFE path active. When the
   // pipeline is live, this also means GMF jobs are running; when an all-off
   // single-mic config has torn the pipeline down, the flag is preserved

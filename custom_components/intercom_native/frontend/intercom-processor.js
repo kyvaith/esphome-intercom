@@ -23,13 +23,33 @@ class RecorderProcessor extends AudioWorkletProcessor {
 
     // Resampling state - works for any input rate (44.1kHz, 48kHz, etc)
     this._resampleRatio = sampleRate / TARGET_SAMPLE_RATE;
-    this._resampleAccum = 0;
+    this._position = 0;
+    this._lastSample = 0;
 
     // Send init message to main thread
     this.port.postMessage({
       type: "debug",
-      message: `Worklet v2.3.0: ${sampleRate}Hz -> ${TARGET_SAMPLE_RATE}Hz (ratio: ${this._resampleRatio.toFixed(2)})`
+      message: `Worklet v2.4.0: ${sampleRate}Hz -> ${TARGET_SAMPLE_RATE}Hz`
     });
+  }
+
+  _writeSample(sample) {
+    const s = Math.max(-1, Math.min(1, sample));
+    this._buffers[this._activeBuffer][this._writeIndex++] =
+      s < 0 ? s * 0x8000 : s * 0x7fff;
+
+    if (this._writeIndex !== this._targetSamples) return;
+
+    const frame = this._buffers[this._activeBuffer];
+    this._chunksSent++;
+    try {
+      this.port.postMessage({ type: "audio", buffer: frame.buffer }, [frame.buffer]);
+    } catch (err) {
+      console.error("[IntercomProcessor] postMessage error:", err);
+    }
+    this._buffers[this._activeBuffer] = new Int16Array(this._targetSamples);
+    this._activeBuffer ^= 1;
+    this._writeIndex = 0;
   }
 
   process(inputList, _outputList, _parameters) {
@@ -49,35 +69,20 @@ class RecorderProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    // Resample to 16kHz using fractional accumulator
-    // Works correctly for any input rate (44.1kHz, 48kHz, etc)
-    for (let i = 0; i < float32Data.length; i++) {
-      this._resampleAccum += 1;
-      if (this._resampleAccum >= this._resampleRatio) {
-        const s = Math.max(-1, Math.min(1, float32Data[i]));
-        this._buffers[this._activeBuffer][this._writeIndex++] =
-          s < 0 ? s * 0x8000 : s * 0x7fff;
-        this._resampleAccum -= this._resampleRatio;
-
-        if (this._writeIndex === this._targetSamples) {
-          const frame = this._buffers[this._activeBuffer];
-          this._chunksSent++;
-
-          // Transfer the completed frame; transferred buffers are detached, so
-          // replace the slot before it can be reused by the audio callback.
-          try {
-            this.port.postMessage({
-              type: "audio",
-              buffer: frame.buffer
-            }, [frame.buffer]);
-          } catch (err) {
-            console.error("[IntercomProcessor] postMessage error:", err);
-          }
-          this._buffers[this._activeBuffer] = new Int16Array(this._targetSamples);
-          this._activeBuffer ^= 1;
-          this._writeIndex = 0;
-        }
+    if (sampleRate === TARGET_SAMPLE_RATE) {
+      for (let i = 0; i < float32Data.length; i++) this._writeSample(float32Data[i]);
+    } else {
+      const ratio = this._resampleRatio;
+      while (this._position < float32Data.length) {
+        const idx = Math.floor(this._position);
+        const frac = this._position - idx;
+        const a = idx > 0 ? float32Data[idx - 1] : this._lastSample;
+        const b = float32Data[idx] ?? a;
+        this._writeSample(a + (b - a) * frac);
+        this._position += ratio;
       }
+      this._position -= float32Data.length;
+      this._lastSample = float32Data[float32Data.length - 1] || this._lastSample;
     }
     this._totalSamplesProcessed += float32Data.length;
 

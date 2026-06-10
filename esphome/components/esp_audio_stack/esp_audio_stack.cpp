@@ -1086,20 +1086,20 @@ void ESPAudioStack::deinit_i2s_() {
   ESP_LOGI(TAG, "I2S deinitialized");
 }
 
-bool ESPAudioStack::wait_audio_task_idle_(uint32_t timeout_ms) {
-  if (this->audio_task_idle_.load(std::memory_order_relaxed)) {
+bool ESPAudioStack::wait_audio_task_state_(bool idle, uint32_t timeout_ms) {
+  if (this->audio_task_idle_.load(std::memory_order_relaxed) == idle) {
     return true;
   }
   TaskHandle_t waiter = xTaskGetCurrentTaskHandle();
   ulTaskNotifyTake(pdTRUE, 0);
-  this->audio_idle_waiter_.store(waiter, std::memory_order_release);
-  if (this->audio_task_idle_.load(std::memory_order_relaxed)) {
-    this->audio_idle_waiter_.store(nullptr, std::memory_order_release);
+  this->audio_state_waiter_.store(waiter, std::memory_order_release);
+  if (this->audio_task_idle_.load(std::memory_order_relaxed) == idle) {
+    this->audio_state_waiter_.store(nullptr, std::memory_order_release);
     return true;
   }
   const bool ok = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(timeout_ms)) > 0 ||
-                  this->audio_task_idle_.load(std::memory_order_relaxed);
-  this->audio_idle_waiter_.store(nullptr, std::memory_order_release);
+                  this->audio_task_idle_.load(std::memory_order_relaxed) == idle;
+  this->audio_state_waiter_.store(nullptr, std::memory_order_release);
   return ok;
 }
 
@@ -1168,11 +1168,7 @@ void ESPAudioStack::start() {
   }
   if (this->processor_ != nullptr &&
       this->has_mic_consumers_.load(std::memory_order_relaxed)) {
-    // GMF AFE pipeline_run() must not be called before the audio task can feed
-    // the AFE input port. Start I2S and wake the realtime task first; otherwise
-    // dual-mic GMF devices can hit ESP_GMF_TASK Run timeout when MWW/VA starts
-    // while media playback is parked/paused.
-    vTaskDelay(1);
+    this->wait_audio_task_active_(50);
     this->processor_->set_processing_active(true);
   }
 #endif

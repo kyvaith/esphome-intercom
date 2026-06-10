@@ -848,6 +848,14 @@ EspAfe::AfeInstance EspAfe::detach_instance_() {
   return instance;
 }
 
+void EspAfe::clear_process_busy_() {
+  this->process_busy_.store(false, std::memory_order_seq_cst);
+  TaskHandle_t waiter = this->process_drain_waiter_.load(std::memory_order_acquire);
+  if (waiter != nullptr) {
+    xTaskNotifyGive(waiter);
+  }
+}
+
 bool EspAfe::recreate_instance_(bool require_same_frame_sizes) {
   const int64_t reinit_start_us = esp_timer_get_time();
   int64_t stage_start_us = reinit_start_us;
@@ -878,26 +886,25 @@ bool EspAfe::recreate_instance_(bool require_same_frame_sizes) {
     return false;
   }
 
-  // Drain protocol: signal process() to bail, then wait for any in-flight
-  // call to complete. process_busy_ is cleared at the end of process() with
-  // release semantics; our acquire load here pairs with that store so we
-  // observe a quiesced state before touching the instance. Timeout is a
-  // safety net: if i2s_audio_task is stuck elsewhere we proceed anyway to
-  // avoid deadlocking the reconfiguration.
-  this->drain_request_.store(true, std::memory_order_release);
-  TickType_t drain_deadline = xTaskGetTickCount() + DRAIN_WAIT_TIMEOUT;
-  while (this->process_busy_.load(std::memory_order_acquire)) {
-    if (xTaskGetTickCount() >= drain_deadline) {
+  // Drain protocol: seq_cst gives the request/busy atomics one total order.
+  // That prevents the store-buffer false/false outcome that release/acquire
+  // would still allow on different atomic objects.
+  this->drain_request_.store(true, std::memory_order_seq_cst);
+  if (this->process_busy_.load(std::memory_order_seq_cst)) {
+    TaskHandle_t waiter = xTaskGetCurrentTaskHandle();
+    ulTaskNotifyTake(pdTRUE, 0);
+    this->process_drain_waiter_.store(waiter, std::memory_order_release);
+    if (this->process_busy_.load(std::memory_order_seq_cst) &&
+        ulTaskNotifyTake(pdTRUE, DRAIN_WAIT_TIMEOUT) == 0) {
       ESP_LOGW(TAG, "Drain timeout waiting for process() to quiesce, proceeding");
-      break;
     }
-    vTaskDelay(1);
+    this->process_drain_waiter_.store(nullptr, std::memory_order_release);
   }
   log_stage("drain");
 
   // From here on the ScopedLock auto-releases on every return path; only the
   // drain flag has to be reset before each return.
-  auto release_drain = [this]() { this->drain_request_.store(false, std::memory_order_release); };
+  auto release_drain = [this]() { this->drain_request_.store(false, std::memory_order_seq_cst); };
 
   // esp-sr FFT resources are global: only one AFE instance can exist.
   // Must destroy the previous instance before creating the next one.
@@ -1456,14 +1463,11 @@ bool EspAfe::process(const int16_t *in_mic, const int16_t *in_ref, int16_t *out,
   auto finish_process_timing = []() {};
 #endif
 
-  // Drain protocol entry: mark busy before observing drain flag. The release
-  // on busy is paired with the acquire on drain_request_ in the writer
-  // (recreate_instance_), so either the writer sees busy=true and waits, or
-  // we see drain_request_=true and bail. We cannot see both false/false and
-  // then observe a torn instance.
-  this->process_busy_.store(true, std::memory_order_release);
-  if (this->drain_request_.load(std::memory_order_acquire)) {
-    this->process_busy_.store(false, std::memory_order_release);
+  // Seq_cst matches recreate_instance_ so either the writer sees busy=true, or
+  // this frame sees drain_request_=true and emits silence before touching AFE.
+  this->process_busy_.store(true, std::memory_order_seq_cst);
+  if (this->drain_request_.load(std::memory_order_seq_cst)) {
+    this->clear_process_busy_();
     silence_frame(out, os);
     finish_process_timing();
     return false;
@@ -1475,7 +1479,7 @@ bool EspAfe::process(const int16_t *in_mic, const int16_t *in_ref, int16_t *out,
   int fs = this->feed_chunksize_;
   if (qs <= 0 || os <= 0 || fs <= 0 || this->feed_buf_ == nullptr) {
     silence_frame(out, os);
-    this->process_busy_.store(false, std::memory_order_release);
+    this->clear_process_busy_();
     finish_process_timing();
     return false;
   }
@@ -1497,19 +1501,24 @@ bool EspAfe::process(const int16_t *in_mic, const int16_t *in_ref, int16_t *out,
   }
   this->last_process_mic_channels_ = transport_mic_channels;
 
+  const bool sample_rms =
+      (this->input_volume_sensor_enabled_ || this->output_rms_sensor_enabled_) &&
+      !this->warmup_remaining_ && qs > 0 && (++this->rms_sensor_divider_ >= 8);
+  if (sample_rms) {
+    this->rms_sensor_divider_ = 0;
+  }
+
   // Input RMS: compute on the transport mic before feeding the AFE pipeline.
   // Replaces ESP-SR's app-level data_volume signal. Pass stride so we
   // read mic1 samples only when the transport delivers interleaved
   // channels (otherwise the RMS mixes mic1 + mic2 + reference and the
   // dBFS sensor reports nonsense).
-  if (this->input_volume_sensor_enabled_ && !this->warmup_remaining_ && qs > 0) {
+  if (sample_rms && this->input_volume_sensor_enabled_) {
     this->input_volume_dbfs_.store(
         compute_rms_dbfs_i16(in_mic, static_cast<size_t>(qs),
                              static_cast<size_t>(transport_mic_channels)),
         std::memory_order_relaxed);
   }
-
-  const bool warmup_active = this->warmup_remaining_ > 0;
 
   const int tc = this->total_channels_;
   int16_t *dst = this->feed_buf_ + offset * tc;
@@ -1575,17 +1584,15 @@ bool EspAfe::process(const int16_t *in_mic, const int16_t *in_ref, int16_t *out,
   }
   if (!processed) {
     silence_frame(out, os);
-    if (!warmup_active) {
-    }
   }
 
   // Release drain guard BEFORE emitting telemetry / counters: those touch
   // only atomics on this and can safely race with a rebuild.
-  this->process_busy_.store(false, std::memory_order_release);
+  this->clear_process_busy_();
 
   // Output-side RMS depends on the samples handed to the caller. Input volume
   // is computed before feeding GMF, and VAD state comes from esp_gmf_afe events.
-  if (processed && this->output_rms_sensor_enabled_) {
+  if (processed && sample_rms && this->output_rms_sensor_enabled_) {
     this->output_rms_dbfs_.store(compute_rms_dbfs_i16(out, os), std::memory_order_relaxed);
   }
   finish_process_timing();
@@ -1793,8 +1800,7 @@ esp_gmf_err_io_t EspAfe::gmf_output_release_(esp_gmf_payload_t *load, int wait_t
   }
 
   const size_t want = load->valid_size;
-  size_t wrote = this->fetch_output_ring_->write_without_replacement(load->buf, want,
-                                                                     pdMS_TO_TICKS(5), false);
+  size_t wrote = this->fetch_output_ring_->write_without_replacement(load->buf, want, 0, false);
   if (wrote != want) {
     diag_add(this->output_ring_drop_);
   } else {
@@ -1803,6 +1809,10 @@ esp_gmf_err_io_t EspAfe::gmf_output_release_(esp_gmf_payload_t *load, int wait_t
     update_peak_atomic(this->fetch_queue_peak_, queued);
   }
   this->update_fetch_ring_free_pct_();
+  TaskHandle_t waiter = this->pipeline_flush_waiter_.load(std::memory_order_acquire);
+  if (waiter != nullptr) {
+    xTaskNotifyGive(waiter);
+  }
   return ESP_GMF_IO_OK;
 }
 
@@ -1823,8 +1833,7 @@ void EspAfe::handle_manager_result_(afe_fetch_result_t *result) {
   const size_t want = static_cast<size_t>(result->data_size);
   const uint8_t *src_bytes = reinterpret_cast<const uint8_t *>(result->data);
 
-  size_t wrote = this->fetch_output_ring_->write_without_replacement(src_bytes, want,
-                                                                     pdMS_TO_TICKS(5), false);
+  size_t wrote = this->fetch_output_ring_->write_without_replacement(src_bytes, want, 0, false);
   if (wrote != want) {
     diag_add(this->output_ring_drop_);
   } else {
@@ -1843,6 +1852,10 @@ void EspAfe::handle_manager_result_(afe_fetch_result_t *result) {
   }
 
   this->update_fetch_ring_free_pct_();
+  TaskHandle_t waiter = this->pipeline_flush_waiter_.load(std::memory_order_acquire);
+  if (waiter != nullptr) {
+    xTaskNotifyGive(waiter);
+  }
 }
 
 #ifdef USE_ESP_AFE_DIRECT_PATH
@@ -2147,15 +2160,15 @@ void EspAfe::flush_pipeline_before_stop_() {
   const size_t feed_bytes = static_cast<size_t>(this->feed_chunksize_) *
                             this->total_channels_ * sizeof(int16_t);
   memset(this->feed_buf_, 0, feed_bytes);
+  TaskHandle_t waiter = xTaskGetCurrentTaskHandle();
+  ulTaskNotifyTake(pdTRUE, 0);
+  this->pipeline_flush_waiter_.store(waiter, std::memory_order_release);
   if (xRingbufferSend(this->feed_input_ring_, this->feed_buf_, feed_bytes, pdMS_TO_TICKS(10))) {
     uint32_t queued = diag_increment_and_get(this->feed_queue_frames_);
     update_peak_atomic(this->feed_queue_peak_, queued);
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
   }
-
-  // esp_gmf_afe_manager's fetch task blocks in esp-sr fetch(). Give the feed
-  // task one short window to consume the zero frame so fetch can return before
-  // we suspend or destroy the manager.
-  vTaskDelay(pdMS_TO_TICKS(40));
+  this->pipeline_flush_waiter_.store(nullptr, std::memory_order_release);
 }
 
 bool EspAfe::prepare_feed_input_ring_() {

@@ -6,6 +6,7 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/preferences.h"
+#include "../audio_processor/audio_utils.h"
 #include "../audio_processor/ring_buffer_caps.h"
 
 #ifdef USE_INTERCOM_API_MIC
@@ -552,7 +553,7 @@ class IntercomApi : public Component {
 #endif
 #ifdef USE_INTERCOM_API_MIC
   uint8_t *tx_audio_chunk_{nullptr};
-  bool read_tx_chunk_(uint8_t *audio_chunk, const uint8_t **chunk_data, void **release_item);
+  bool read_tx_chunk_(uint8_t *audio_chunk);
 
   // task_stacks_in_psram_: true puts task stacks in PSRAM (saves internal
   // heap on S3/P4 with heavy AFE/MWW/LVGL load); false keeps them in
@@ -650,7 +651,7 @@ class IntercomApi : public Component {
   bool dc_offset_removal_{false};       // for mics with DC bias (SPH0645)
   bool buffers_in_psram_{false};
 #ifdef USE_INTERCOM_API_MIC
-  int32_t dc_offset_{0};
+  DcBlockerState dc_blocker_;
 
   // Pre-allocated to avoid task-stack VLAs.
   std::atomic<int16_t *> mic_converted_{nullptr};  // 512 samples, lazy for optional mic processing

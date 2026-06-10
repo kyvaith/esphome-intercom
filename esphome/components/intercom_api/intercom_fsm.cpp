@@ -481,7 +481,7 @@ void IntercomApi::set_streaming_(bool on) {
     }
 #endif
 #ifdef USE_INTERCOM_API_MIC
-    this->dc_offset_ = 0;
+    this->dc_blocker_ = {};
 #endif
 
     this->set_call_state_(CallState::STREAMING);  // publishes state internally

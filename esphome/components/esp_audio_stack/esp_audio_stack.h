@@ -6,6 +6,7 @@
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
+#include "../audio_processor/audio_utils.h"
 #include "../audio_processor/ring_buffer_caps.h"
 
 #ifdef USE_ESP_AUDIO_STACK_HARDWARE_CODEC
@@ -545,8 +546,7 @@ class ESPAudioStack : public Component {
     // can escalate only when it persists while audio_stack_running_ stays true
     // (channel corrupted independently of our own teardown).
     int invalid_state_errors{0};
-    // DC-HPF state lives on the component (dc_prev_*_persistent_); the
-    // process_rx_path_ loop reads/writes it directly so the IIR keeps
+    // DC-HPF state lives on the component; the process_rx_path_ loop keeps
     // converging across audio_session_ restarts (frame_spec changes
     // would otherwise zero the state and produce ~10 ms of mic gain
     // transient on every reconfigure).
@@ -615,7 +615,9 @@ class ESPAudioStack : public Component {
 #ifdef USE_AUDIO_PROCESSOR
   void run_processor_(AudioTaskCtx &ctx);
 #endif
-  bool wait_audio_task_idle_(uint32_t timeout_ms);
+  bool wait_audio_task_state_(bool idle, uint32_t timeout_ms);
+  bool wait_audio_task_idle_(uint32_t timeout_ms) { return this->wait_audio_task_state_(true, timeout_ms); }
+  bool wait_audio_task_active_(uint32_t timeout_ms) { return this->wait_audio_task_state_(false, timeout_ms); }
 
 #ifdef USE_ESP_AUDIO_STACK_MONO_REF
   // Fill ctx.spk_ref_buffer for the mono AEC path (ring buffer or previous
@@ -716,10 +718,10 @@ class ESPAudioStack : public Component {
   Trigger<> speaker_start_trigger_;
   Trigger<> speaker_idle_trigger_;
   // audio_task_idle_: true while the task is parked in its outer wait loop
-  //                   (not owning I2S). Waiters use audio_idle_waiter_ instead
-  //                   of polling when synchronous maintenance needs the task parked.
+  //                   (not owning I2S). Waiters use audio_state_waiter_ instead
+  //                   of polling when maintenance needs a specific task state.
   std::atomic<bool> audio_task_idle_{true};
-  std::atomic<TaskHandle_t> audio_idle_waiter_{nullptr};
+  std::atomic<TaskHandle_t> audio_state_waiter_{nullptr};
   TaskHandle_t audio_task_handle_{nullptr};
 
   // Cross-thread buffer operation request (main thread -> audio task, avoids concurrent ring buffer access)
@@ -745,11 +747,8 @@ class ESPAudioStack : public Component {
   std::atomic<uint32_t> tdm_ref_silent_frames_{0};
 #endif
 
-  // DC-HPF state, persistent across audio_session_ restarts.
-  int32_t dc_prev_input_persistent_{0};
-  int32_t dc_prev_output_persistent_{0};
-  int32_t dc_prev_input_secondary_persistent_{0};
-  int32_t dc_prev_output_secondary_persistent_{0};
+  DcBlockerState dc_primary_;
+  DcBlockerState dc_secondary_;
 
   // Mic data callbacks
   MicCallbackSlot mic_callbacks_[MAX_LISTENERS]{};  // Post-processor stream for MWW, VA, intercom

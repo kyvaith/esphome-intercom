@@ -3,6 +3,16 @@
 [![Platform](https://img.shields.io/badge/Platform-ESP32--S3%20%7C%20ESP32--P4-blue.svg)](#hardware-support)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-native-blue.svg)](https://www.home-assistant.io)
 
+## BREAKING CHANGES for 2026.6.3
+
+`2026.6.3` moves Lovelace/browser audio off Home Assistant's shared frontend
+WebSocket. The card now uses the authenticated `/api/intercom_native/ws`
+endpoint with binary 16 kHz PCM frames, one page-level audio engine and
+server-authoritative call teardown. Custom clients using the removed
+`intercom_native/audio` or `intercom_native/subscribe_audio` JSON/base64
+commands must migrate before upgrading. See
+[`docs/BREAKING_CHANGES.md`](docs/BREAKING_CHANGES.md).
+
 ## BREAKING CHANGES for 2026.6.2
 
 `2026.6.2` is a stabilization update focused on the Home Assistant softphone
