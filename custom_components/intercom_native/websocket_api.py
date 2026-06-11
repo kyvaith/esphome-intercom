@@ -59,6 +59,7 @@ _bridges: Dict[str, "BridgeSession"] = {}
 
 CALL_EVENT = "intercom_native.call_event"
 WS_AUDIO_IDLE_TIMEOUT = 5.0
+WS_AUDIO_RECONNECT_GRACE = 15.0
 WS_AUDIO_WATCHDOG_INTERVAL = 1.0
 
 
@@ -93,7 +94,7 @@ def _ha_softphone_dnd(hass: HomeAssistant) -> bool:
 
 def _ha_softphone_state(hass: HomeAssistant) -> dict[str, Any]:
     store = _ha_softphone_store(hass)
-    return {
+    state = {
         "device_id": HA_SOFTPHONE_DEVICE_ID,
         "session_device_id": store.get("session_device_id", ""),
         "dnd": _ha_softphone_dnd(hass),
@@ -101,7 +102,14 @@ def _ha_softphone_state(hass: HomeAssistant) -> dict[str, Any]:
         "state": store.get("state", "idle"),
         "caller": store.get("caller", ""),
         "peer_name": store.get("peer_name", ""),
+        "target_device_id": store.get("target_device_id", ""),
     }
+    session = _sessions.get(str(state["session_device_id"] or ""))
+    if session is not None:
+        state.update(_session_audio_payload(session, str(state["state"] or "idle")))
+        state["audio_mode"] = session.audio_mode
+        state["busy"] = True
+    return state
 
 
 def _ha_softphone_session_device_id(hass: HomeAssistant) -> str:
@@ -127,11 +135,14 @@ def _set_ha_softphone_call_state(
         store.pop("state", None)
         store.pop("caller", None)
         store.pop("peer_name", None)
+        store.pop("target_device_id", None)
     else:
         store["session_device_id"] = session_device_id
         store["state"] = state
         store["caller"] = caller
         store["peer_name"] = peer_name
+        if "target_device_id" in extra:
+            store["target_device_id"] = extra["target_device_id"]
 
     payload = {
         "device_id": HA_SOFTPHONE_DEVICE_ID,
@@ -376,19 +387,24 @@ class IntercomSession:
         if self._audio_ws is not ws:
             return
         self._audio_ws = None
-        await cancel_task(self._audio_ws_task)
-        self._audio_ws_task = None
         if stop:
+            await cancel_task(self._audio_ws_task)
+            self._audio_ws_task = None
             await _stop_device_sessions(self.device_id, hass=self.hass)
 
     async def _audio_watchdog(self) -> None:
         try:
-            while self.is_active:
+            missing_ws_since: float | None = None
+            while self._state is not SessionState.ENDED:
                 await asyncio.sleep(WS_AUDIO_WATCHDOG_INTERVAL)
                 ws = self._audio_ws
                 if ws is None or ws.closed:
-                    await _stop_device_sessions(self.device_id, hass=self.hass)
-                    return
+                    missing_ws_since = missing_ws_since or time.monotonic()
+                    if time.monotonic() - missing_ws_since > WS_AUDIO_RECONNECT_GRACE:
+                        await _stop_device_sessions(self.device_id, hass=self.hass)
+                        return
+                    continue
+                missing_ws_since = None
                 if _has_speaker(self.audio_mode) and time.monotonic() - self._last_browser_audio > WS_AUDIO_IDLE_TIMEOUT:
                     await _stop_device_sessions(self.device_id, hass=self.hass)
                     return
@@ -1487,7 +1503,7 @@ class IntercomAudioWebSocketView(HomeAssistantView):
         finally:
             session = _sessions.get(device_id)
             if session is not None:
-                await session.unbind_audio_ws(ws)
+                await session.unbind_audio_ws(ws, stop=False)
         return ws
 
     async def _handle_control(

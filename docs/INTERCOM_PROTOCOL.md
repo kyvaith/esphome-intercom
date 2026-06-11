@@ -201,6 +201,13 @@ not part of the ESP wire protocol and is not a silent fallback for direct
 ESP-to-ESP calls. Direct calls require common formats and reject the call when
 the intersection is empty.
 
+Compressed media codecs are deliberately outside this realtime wire contract.
+ESPHome may decode MP3, FLAC, Opus or WAV in media-player/source pipelines, but
+intercom `AUDIO` remains raw negotiated PCM. Adding a compressed intercom mode
+would require a separate measured codec profile with explicit realtime
+encode/decode, jitter and CPU/PSRAM budgets; it must not be inferred from
+ESPHome playback-decoder availability.
+
 ## Browser Audio WebSocket
 
 The Lovelace softphone does not use the shared HA frontend WebSocket for audio.

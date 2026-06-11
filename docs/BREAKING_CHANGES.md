@@ -42,6 +42,14 @@ and `rx_formats`; for example, an AFE-backed microphone branch may remain
 Home Assistant can bridge mismatched legs by explicit PCM conversion. Direct
 ESP-to-ESP calls require a common format and reject cleanly when none exists.
 
+Mixed fleets need one extra rule during the transition: update both endpoints
+before enabling non-legacy formats on direct ESP-to-ESP calls. Legacy firmware
+does not confirm the selected formats in `ANSWER`; a newer high-rate caller can
+therefore ring a legacy destination and then close the call with a protocol
+error because the answer cannot prove the negotiated PCM format. Keeping mixed
+fleets on `16000:s16le:1:32` or routing through Home Assistant avoids that
+ambiguous state.
+
 ## 2026.6.2: HA softphone and full-device runtime cleanup
 
 `2026.6.2` documents only changes from `2026.6.1`. The PBX-lite phonebook

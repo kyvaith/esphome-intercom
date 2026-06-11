@@ -50,6 +50,12 @@ Common symptoms and fixes when setting up ESPHome Intercom.
 3. Check browser console for AudioContext errors.
 4. Try a different browser (Chrome recommended).
 
+Current Chromium and Firefox builds normally accept the 16 kHz capture
+`AudioContext` used by the card. If a browser rejects that requested sample
+rate, the capture worklet falls back to browser-rate capture and lightweight
+interpolation. That fallback is for compatibility, not best quality; use an
+up-to-date Chromium/Firefox browser when testing negotiated high-rate audio.
+
 ## Card shows "audio websocket failed"
 
 The current card uses `/api/intercom_native/ws` for authenticated binary audio.
@@ -113,6 +119,11 @@ Fixes:
 3. Keep AFE/AEC-backed microphone branches at the esp-sr surface
    `16000:s16le:1:32`; only native microphone/speaker branches should advertise
    higher-rate formats.
+4. During a rolling upgrade, keep direct ESP-to-ESP calls on
+   `16000:s16le:1:32` until both endpoints run firmware that supports
+   negotiated `START` and `ANSWER` audio-format blocks. A newer high-rate caller
+   cannot safely stream to firmware that answers without confirming the selected
+   PCM format.
 
 ## UDP endpoint missing or rejected after enabling high-rate audio
 
@@ -134,6 +145,15 @@ Use one of these:
 - Use a smaller container where the hardware path allows it.
 - Use a shorter frame duration that still produces an integer number of
   samples and fits under the safe payload threshold.
+
+## Can intercom use MP3, FLAC or Opus instead of PCM?
+
+Not in the realtime intercom protocol. ESPHome's audio/media components can
+decode compressed codecs for media-player and announcement use cases, especially
+on ESP32-S3 devices with PSRAM, but intercom audio is bidirectional and
+latency-sensitive. The wire format is negotiated PCM so each hop has predictable
+frame size, CPU cost and jitter behavior. Use ESPHome media-source/media-player
+pipelines for compressed playback; use intercom for calls.
 
 ## Echo or feedback
 

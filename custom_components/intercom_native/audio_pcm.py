@@ -1,8 +1,22 @@
-"""PCM frame conversion helpers for HA-side intercom bridging."""
+"""PCM frame conversion between negotiated intercom audio formats.
+
+The HA bridge may need to convert between two ESP/browser legs with different
+PCM formats. The implementation keeps decode/encode vectorized and uses a
+stateful anti-aliased rational resampler so downsampling does not fold content
+above the destination Nyquist frequency back into the audible band.
+"""
 
 from __future__ import annotations
 
+from math import gcd
+
+import numpy as np
+
 from .audio_format import AudioFormat, PcmFormat
+
+_RESAMPLER_TAPS_PER_PHASE = 24
+_KAISER_BETA = 9.0
+_ROLLOFF = 0.945
 
 
 def _sign_extend(value: int, bits: int) -> int:
@@ -11,6 +25,7 @@ def _sign_extend(value: int, bits: int) -> int:
 
 
 def _decode_sample(data: bytes, offset: int, fmt: PcmFormat) -> float:
+    """Scalar decode kept for tests and debug tooling; streams use _decode_frame."""
     if fmt is PcmFormat.S16LE:
         return int.from_bytes(data[offset:offset + 2], "little", signed=True) / 32768.0
     if fmt is PcmFormat.S24LE:
@@ -21,6 +36,7 @@ def _decode_sample(data: bytes, offset: int, fmt: PcmFormat) -> float:
 
 
 def _encode_sample(sample: float, fmt: PcmFormat) -> bytes:
+    """Scalar encode kept for tests and debug tooling; streams use _encode_frame."""
     sample = max(-1.0, min(1.0, sample))
     if fmt is PcmFormat.S16LE:
         value = int(sample * (32768 if sample < 0 else 32767))
@@ -35,66 +51,98 @@ def _encode_sample(sample: float, fmt: PcmFormat) -> bytes:
     return value.to_bytes(4, "little", signed=True)
 
 
-def _decode_frame(data: bytes, fmt: AudioFormat) -> list[list[float]]:
+def _decode_frame(data: bytes, fmt: AudioFormat) -> np.ndarray:
+    """Decode PCM bytes to a float64 array shaped (channels, samples)."""
     stride = fmt.container_bytes_per_sample * fmt.channels
     if len(data) % stride:
         raise ValueError(
             f"audio frame length {len(data)} is not aligned to {fmt.wire_token()}"
         )
-    frames = len(data) // stride
-    channels = [[] for _ in range(fmt.channels)]
-    offset = 0
-    for _ in range(frames):
-        for channel in range(fmt.channels):
-            channels[channel].append(_decode_sample(data, offset, fmt.pcm_format))
-            offset += fmt.container_bytes_per_sample
-    return channels
+    if fmt.pcm_format is PcmFormat.S16LE:
+        flat = np.frombuffer(data, dtype="<i2").astype(np.float64) / 32768.0
+    elif fmt.pcm_format is PcmFormat.S24LE:
+        raw = np.frombuffer(data, dtype=np.uint8).reshape(-1, 3)
+        value = (
+            raw[:, 0].astype(np.int32)
+            | (raw[:, 1].astype(np.int32) << 8)
+            | (raw[:, 2].astype(np.int8).astype(np.int32) << 16)
+        )
+        flat = value.astype(np.float64) / 8388608.0
+    elif fmt.pcm_format is PcmFormat.S24LE_IN_S32:
+        flat = (np.frombuffer(data, dtype="<i4") >> 8).astype(np.float64) / 8388608.0
+    else:
+        flat = np.frombuffer(data, dtype="<i4").astype(np.float64) / 2147483648.0
+    return flat.reshape(-1, fmt.channels).T
 
 
-def _map_channels(channels: list[list[float]], out_channels: int) -> list[list[float]]:
-    if out_channels == 1 and len(channels) > 1:
-        return [[sum(frame) / len(channels) for frame in zip(*channels)]]
-    if out_channels <= len(channels):
+def _encode_frame(channels: np.ndarray, dst: AudioFormat) -> bytes:
+    """Encode a float array shaped (channels, samples) to destination PCM bytes."""
+    interleaved = np.clip(channels.T.reshape(-1), -1.0, None)
+    if dst.pcm_format is PcmFormat.S16LE:
+        scaled = np.minimum(interleaved * 32768.0, 32767.0)
+        return scaled.astype("<i2").tobytes()
+    if dst.pcm_format is PcmFormat.S24LE:
+        scaled = np.minimum(interleaved * 8388608.0, 8388607.0).astype("<i4")
+        return scaled.view(np.uint8).reshape(-1, 4)[:, :3].tobytes()
+    if dst.pcm_format is PcmFormat.S24LE_IN_S32:
+        scaled = np.minimum(interleaved * 8388608.0, 8388607.0).astype("<i4") << 8
+        return scaled.astype("<i4").tobytes()
+    scaled = np.minimum(interleaved * 2147483648.0, 2147483647.0)
+    return scaled.astype("<i4").tobytes()
+
+
+def _map_channels(channels: np.ndarray, out_channels: int) -> np.ndarray:
+    in_channels = channels.shape[0]
+    if out_channels == 1 and in_channels > 1:
+        return channels.mean(axis=0, keepdims=True)
+    if out_channels <= in_channels:
         return channels[:out_channels]
-    return channels + [channels[-1]] * (out_channels - len(channels))
+    pad = np.repeat(channels[-1:], out_channels - in_channels, axis=0)
+    return np.concatenate([channels, pad], axis=0)
 
 
-def _resample_channel(samples: list[float], out_frames: int, src_rate: int, dst_rate: int) -> list[float]:
-    if not samples or out_frames <= 0:
-        return [0.0] * max(0, out_frames)
-    if len(samples) == out_frames:
-        return samples
-    ratio = src_rate / dst_rate
-    out: list[float] = []
-    for index in range(out_frames):
-        pos = index * ratio
-        left = int(pos)
-        if left >= len(samples):
-            out.append(samples[-1])
-            continue
-        right = min(left + 1, len(samples) - 1)
-        frac = pos - left
-        out.append(samples[left] + (samples[right] - samples[left]) * frac)
-    return out
+class _PolyphaseResampler:
+    """Stateful rational resampler with a Kaiser-windowed low-pass filter."""
 
+    def __init__(self, src_rate: int, dst_rate: int, in_samples: int, channels: int) -> None:
+        g = gcd(src_rate, dst_rate)
+        self._up = dst_rate // g
+        self._down = src_rate // g
+        self._identity = self._up == self._down
+        if self._identity:
+            return
 
-def _encode_frame(channels: list[list[float]], dst: AudioFormat) -> bytes:
-    out_frames = len(channels[0]) if channels else 0
-    out = bytearray(out_frames * dst.channels * dst.container_bytes_per_sample)
-    offset = 0
-    for frame in range(out_frames):
-        for channel in range(dst.channels):
-            encoded = _encode_sample(channels[channel][frame], dst.pcm_format)
-            out[offset:offset + len(encoded)] = encoded
-            offset += len(encoded)
-    return bytes(out)
+        out_samples = (in_samples * self._up) // self._down
+        taps = _RESAMPLER_TAPS_PER_PHASE
+        filter_len = taps * self._up
+        n = np.arange(filter_len) - (filter_len - 1) / 2.0
+        cutoff = _ROLLOFF * min(1.0 / self._up, 1.0 / self._down)
+        kernel = cutoff * np.sinc(cutoff * n) * np.kaiser(filter_len, _KAISER_BETA)
+        kernel *= self._up / kernel.reshape(taps, self._up).sum(axis=0).max()
+
+        self._history = taps
+        out_index = np.arange(out_samples)
+        upsampled = out_index * self._down
+        phase = upsampled % self._up
+        center = upsampled // self._up
+        tap_index = np.arange(taps)
+        self._gather = self._history + center[:, None] - tap_index[None, :]
+        self._coeffs = kernel[phase[:, None] + tap_index[None, :] * self._up]
+        self._tail = np.zeros((channels, self._history), dtype=np.float64)
+
+    def process(self, channels: np.ndarray) -> np.ndarray:
+        if self._identity:
+            return channels
+        x = np.concatenate([self._tail, channels], axis=1)
+        self._tail = x[:, -self._history:]
+        return np.einsum("ot,cot->co", self._coeffs, x[:, self._gather], optimize=True)
 
 
 def convert_audio_frame(data: bytes, src: AudioFormat, dst: AudioFormat) -> bytes:
     """Convert one PCM frame between negotiated intercom formats.
 
-    Matching formats return the original bytes. Otherwise HA performs explicit
-    channel mapping, linear sample-rate conversion and PCM container conversion.
+    Matching formats return the original bytes. Use PcmFrameConverter for
+    streams, especially when sample rate or frame duration changes.
     """
     if src == dst:
         return data
@@ -102,13 +150,11 @@ def convert_audio_frame(data: bytes, src: AudioFormat, dst: AudioFormat) -> byte
         raise ValueError(
             f"frame_ms conversion requires stateful reframing: {src.wire_token()} -> {dst.wire_token()}"
         )
-    src_channels = _map_channels(_decode_frame(data, src), dst.channels)
-    out_frames = dst.nominal_frame_samples
-    resampled = [
-        _resample_channel(channel, out_frames, src.sample_rate, dst.sample_rate)
-        for channel in src_channels
-    ]
-    return _encode_frame(resampled, dst)
+    channels = _map_channels(_decode_frame(data, src), dst.channels)
+    resampler = _PolyphaseResampler(
+        src.sample_rate, dst.sample_rate, channels.shape[1], dst.channels
+    )
+    return _encode_frame(resampler.process(channels), dst)
 
 
 class PcmFrameConverter:
@@ -117,7 +163,14 @@ class PcmFrameConverter:
     def __init__(self, src: AudioFormat, dst: AudioFormat) -> None:
         self.src = src
         self.dst = dst
-        self._pending = [[] for _ in range(dst.channels)]
+        if (src.frame_ms * dst.sample_rate) % 1000:
+            raise ValueError(
+                f"{src.wire_token()} cannot be reframed exactly at {dst.sample_rate} Hz"
+            )
+        self._resampler = _PolyphaseResampler(
+            src.sample_rate, dst.sample_rate, src.nominal_frame_samples, dst.channels
+        )
+        self._pending = np.empty((dst.channels, 0), dtype=np.float64)
 
     def convert(self, data: bytes) -> list[bytes]:
         if len(data) != self.src.nominal_frame_bytes:
@@ -128,24 +181,14 @@ class PcmFrameConverter:
         if self.src == self.dst:
             return [data]
 
-        src_channels = _map_channels(_decode_frame(data, self.src), self.dst.channels)
-        chunk_frames = (self.src.frame_ms * self.dst.sample_rate) // 1000
-        if self.src.frame_ms * self.dst.sample_rate % 1000:
-            raise ValueError(
-                f"{self.src.wire_token()} cannot be reframed exactly at {self.dst.sample_rate} Hz"
-            )
-        resampled = [
-            _resample_channel(channel, chunk_frames, self.src.sample_rate, self.dst.sample_rate)
-            for channel in src_channels
-        ]
-        for channel, samples in enumerate(resampled):
-            self._pending[channel].extend(samples)
+        channels = _map_channels(_decode_frame(data, self.src), self.dst.channels)
+        self._pending = np.concatenate(
+            [self._pending, self._resampler.process(channels)], axis=1
+        )
 
         out: list[bytes] = []
         frame_samples = self.dst.nominal_frame_samples
-        while len(self._pending[0]) >= frame_samples:
-            frame_channels = [channel[:frame_samples] for channel in self._pending]
-            out.append(_encode_frame(frame_channels, self.dst))
-            for channel in self._pending:
-                del channel[:frame_samples]
+        while self._pending.shape[1] >= frame_samples:
+            out.append(_encode_frame(self._pending[:, :frame_samples], self.dst))
+            self._pending = self._pending[:, frame_samples:]
         return out

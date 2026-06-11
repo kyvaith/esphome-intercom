@@ -36,7 +36,7 @@ class IntercomEngine extends EventTarget {
     this._hiddenTimer = null;
     this._controlWaiter = null;
 
-    window.addEventListener("pagehide", () => this.close("pagehide"));
+    window.addEventListener("pagehide", () => this.close("pagehide", { sendHangup: false }));
     document.addEventListener("visibilitychange", () => this._onVisibility());
   }
 
@@ -361,6 +361,25 @@ class IntercomEngine extends EventTarget {
     }
     if (!await this._setupAudioOrAbort(deviceInfo.device_id, deviceInfo, reply)) return;
     this._setState("STREAMING");
+  }
+
+  async resumeSession(deviceInfo, sessionDeviceId, statePayload) {
+    const state = String(statePayload?.state || "").toLowerCase();
+    if (!["calling", "outgoing", "ringing", "streaming"].includes(state)) return;
+    const deviceId = sessionDeviceId || statePayload?.session_device_id || statePayload?.device_id || this._deviceId;
+    if (!deviceId) return;
+    if (this._ws && this._deviceId === deviceId && this._ws.readyState === WebSocket.OPEN) {
+      this._setState(state === "streaming" ? "STREAMING" : state === "ringing" ? "RINGING" : "CALLING");
+      return;
+    }
+    await this._connect(deviceId);
+    this._resetStats();
+    if (state === "streaming") {
+      if (!await this._setupAudioOrAbort(deviceId, { ...(deviceInfo || {}), device_id: deviceId }, statePayload)) return;
+      this._setState("STREAMING");
+    } else {
+      this._setState(state === "ringing" ? "RINGING" : "CALLING");
+    }
   }
 
   async stop(deviceId = this._deviceId) {

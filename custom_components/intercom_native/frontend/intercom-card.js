@@ -1761,9 +1761,30 @@ class IntercomCard extends HTMLElement {
       });
       this._softphoneDnd = !!result?.dnd;
       if (result?.state && result.state !== "idle") {
-        this._sessionState = result.state;
-        this._activeSessionDeviceId = result.session_device_id || null;
+        const rawState = String(result.state || "").toLowerCase();
+        const sessionDeviceId = result.session_device_id || null;
+        const outgoingRinging =
+          rawState === "ringing" &&
+          !result.caller &&
+          (sessionDeviceId === HA_SOFTPHONE_DEVICE_ID || result.device_id === HA_SOFTPHONE_DEVICE_ID);
+        this._sessionState = outgoingRinging ? "outgoing" : rawState;
+        this._activeSessionDeviceId = sessionDeviceId;
         this._sessionCaller = result.caller || "";
+        const target = result.target_device_id
+          ? this._availableDevices.find(d => d.device_id === result.target_device_id)
+          : this._getSoftphoneTargetDevice();
+        await intercomEngine.resumeSession(
+          {
+            ...(target || {}),
+            device_id: sessionDeviceId || HA_SOFTPHONE_DEVICE_ID,
+            audio_mode: result.audio_mode || target?.audio_mode || "full_duplex",
+            tx_formats: result.rx_format ? [result.rx_format] : target?.tx_formats,
+            rx_formats: result.tx_format ? [result.tx_format] : target?.rx_formats,
+            softphone: true,
+          },
+          sessionDeviceId || HA_SOFTPHONE_DEVICE_ID,
+          result,
+        );
       }
       this._softphoneStateLoaded = true;
     } catch (err) {

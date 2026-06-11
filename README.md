@@ -520,6 +520,13 @@ audio still carries exactly one complete PCM frame per datagram. Formats whose
 frame payload is above the safe datagram threshold are rejected for UDP; use TCP
 for high-rate, stereo or 32-bit frames.
 
+Intercom intentionally transports negotiated PCM, not MP3/FLAC/Opus. ESPHome's
+codec decoders are useful for media-player and announcement pipelines, but
+intercom is a bidirectional low-latency protocol: compressed codecs would add
+realtime encode/decode, jitter behavior and extra CPU/PSRAM budget on every
+hop. Keep compressed media on ESPHome media-source pipelines; keep intercom on
+PCM unless a future measured Opus mode proves worth the cost.
+
 ### TCP protocol (default `tcp_port: 6054`)
 
 The authoritative wire contract lives in [`docs/INTERCOM_PROTOCOL.md`](docs/INTERCOM_PROTOCOL.md). The summary below is kept for orientation.

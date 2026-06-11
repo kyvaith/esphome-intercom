@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import asyncio
+import math
 import sys
 import types
 import unittest
@@ -343,12 +344,34 @@ class IntercomProtocolFixturesTest(unittest.TestCase):
         self.assertLess(max(abs(int.from_bytes(converted[i:i + 2], "little", signed=True))
                             for i in range(0, len(converted), 2)), 2)
 
-    def test_pcm_resampler_uses_sample_rate_ratio_not_frame_endpoint_fit(self) -> None:
-        samples = [float(sample) for sample in range(20)]
-        self.assertEqual(
-            audio_pcm._resample_channel(samples, 5, 48000, 16000),
-            [0.0, 3.0, 6.0, 9.0, 12.0],
-        )
+    def test_pcm_resampler_preserves_in_band_and_rejects_aliases(self) -> None:
+        src = audio_format.AudioFormat(48000, "s16le", 1, 20)
+        dst = audio_format.AudioFormat(16000, "s16le", 1, 20)
+
+        def run_tone(freq_hz: float) -> float:
+            tone_converter = audio_pcm.PcmFrameConverter(src, dst)
+            peak = 0
+            for frame in range(12):
+                base = frame * src.nominal_frame_samples
+                raw = b"".join(
+                    audio_pcm._encode_sample(
+                        0.5 * math.sin(2 * math.pi * freq_hz * (base + i) / src.sample_rate),
+                        src.pcm_format,
+                    )
+                    for i in range(src.nominal_frame_samples)
+                )
+                for out in tone_converter.convert(raw):
+                    if frame < 4:
+                        continue
+                    for off in range(0, len(out), 2):
+                        peak = max(
+                            peak,
+                            abs(int.from_bytes(out[off:off + 2], "little", signed=True)),
+                        )
+            return peak / 32768.0
+
+        self.assertGreater(run_tone(1000.0), 0.4)
+        self.assertLess(run_tone(14000.0), 0.02)
 
     def test_pcm_frame_converter_reframes_different_frame_durations(self) -> None:
         src = audio_format.AudioFormat(48000, "s32le", 1, 20)
