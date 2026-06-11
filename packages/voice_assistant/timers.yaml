@@ -9,11 +9,9 @@
 # Display devices keep their richer LVGL timer UI device-local.
 # =============================================================================
 
-media_player:
-  - id: !extend speaker_media_player
-    files:
-      - id: timer_finished_sound
-        file: ${assets_base}assets/sounds/timer_finished.flac
+audio_file:
+  - id: timer_finished_sound
+    file: ${assets_base}assets/sounds/timer_finished.flac
 
 voice_assistant:
   id: va
@@ -41,8 +39,9 @@ script:
           condition:
             switch.is_on: timer_ringing
           then:
-            - media_player.speaker.play_on_device_media_file:
-                media_file: timer_finished_sound
+            - media_player.play_media:
+                id: speaker_media_player
+                media_url: "audio-file://timer_finished_sound"
                 announcement: true
             - delay: 6s
 
