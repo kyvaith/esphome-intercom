@@ -22,13 +22,13 @@ flowchart LR
         B["📟 ESP B<br/>phonebook"]
         C["📟 ESP C<br/>phonebook"]
         HA["🏠 Home Assistant<br/>peer + switchboard"]
-        Card["🌐 Browser card<br/>softphone"]
+        Card["🌐 Browser card<br/>page-level engine"]
     end
 
     A <-->|"direct<br/>same protocol"| B
     C -->|"ha_pbx<br/>or cross-protocol"| HA
     HA <-->|"bridge / forward"| B
-    Card <-->|"WebSocket audio"| HA
+    Card <-->|"binary PCM<br/>/api/intercom_native/ws"| HA
     HA -. "phonebook sensors" .-> A
 ```
 
@@ -94,7 +94,7 @@ All audio components share three conventions:
 | `afe_fetch` | GMF AFE manager under `esp_gmf_afe` | 1 | 5 | 3 KB | Blocks on esp-sr `fetch()`, writes processed frames to the bridge port |
 | `intercom_srv` | `intercom_api` | 1 | 5 | PSRAM static | Transport RX/control and call FSM handoff |
 | `intercom_tx` | `intercom_api` | 0 | 5 | PSRAM static | Processed mic frames → network |
-| `intercom_spk` | `intercom_api` standalone only | 0 | 4 | PSRAM static | Speaker playback + AEC reference when `intercom_api.processor_id` owns audio |
+| `intercom_spk` | legacy / raw UDP-only paths | 0 | 4 | PSRAM static | Direct speaker playback where no `esp_audio_stack` speaker facade is present |
 | WiFi / lwIP / TCP-IP | ESP-IDF | 0/1 | 18/23 | n/a | System |
 | MWW inference | `micro_wake_word` | 1 | 1 | n/a | TFLite inference |
 | LVGL | `display` | 1 | 1 | n/a | UI render |
@@ -395,11 +395,11 @@ Questions a fresh designer would ask, and the current answer.
 
 ### 8.2 Should the intercom wire format be Protobuf?
 
-**Current**: hand-packed `MessageHeader` (3 bytes: `u8 type | u16 length` LE) + payload, on TCP and on the UDP control socket. UDP audio carries raw L16 with no header.
+**Current**: hand-packed `MessageHeader` (3 bytes: `u8 type | u16 length` LE) + payload, on TCP and on the UDP control socket. UDP audio carries raw negotiated PCM with no header.
 
 **Alternative**: Protobuf.
 
-**Why not in the current design**: the hand-packed header is stable, 4 bytes of overhead per frame, easy to parse in any language and shared across both TCP and UDP transports. The HA `intercom_native` integration parses it directly. A Protobuf change would force matching versions on every ESP and HA install.
+**Why not in the current design**: the hand-packed header is stable, 3 bytes of overhead per framed TCP/control message, easy to parse in any language and shared across both TCP and UDP control transports. UDP audio stays headerless. The HA `intercom_native` integration parses it directly. A Protobuf change would force matching versions on every ESP and HA install.
 
 **Revisit if**: a third-party client appears that the binary protocol blocks.
 
@@ -454,8 +454,39 @@ Key points:
 - **HA peer name is `hass.config.location_name`**: learned from the HA row in `sensor.intercom_phonebook`, or set manually with `esphome.<slug>_set_ha_peer_name` in custom YAML. ESP default is empty; `ha_pbx` with no name logs an ERROR rather than guessing.
 - **Reasons are protocol payload**: `DECLINE(reason)` and terminal reasons (`busy`, `DND`, `remote_device_lost`, etc.) must transit end-to-end. HA bridge forwards them and preserves local/remote perspective instead of replacing them with generic disconnects.
 - **Bus events**: HA emits one unified `intercom_native.call_event` with `scope` (`session`, `bridge`, `forward`), automation-friendly `type` (`outgoing`, `ringing`, `answered`, `ended`, `missed`, `failed`) and the original `state`/reason fields.
+- **Card event subscription**: browser cards subscribe through the scoped
+  `intercom_native/subscribe_call_events` WebSocket command. They do not use
+  HA's generic custom-event subscription path, which is restricted for
+  non-admin users.
 
-### 9.1 Call-state and reason flow
+### 9.1 Browser softphone audio path
+
+The Lovelace card is a view over one page-level `IntercomEngine` singleton:
+
+```
+HA bus event -> IntercomEngine store/replay -> cards render perspective
+Card command -> IntercomEngine -> /api/intercom_native/ws -> IntercomSession
+PCM audio    -> AudioWorklet(s) -> binary WS frames -> IntercomSession
+```
+
+The engine owns the microphone stream, AudioContext, capture worklet, playback
+worklet and the session-bound audio WebSocket. Individual cards only render
+state and send commands. This is the multi-card invariant: five cards on the
+same dashboard are five views, not five audio pipelines.
+
+The audio WebSocket is authenticated through Home Assistant's normal HTTP auth
+and is bound to exactly one softphone/session leg. Browser-to-ESP audio is sent
+as binary frames with a one-byte type followed by one complete negotiated PCM
+frame. ESP-to-browser audio uses the same binary framing in the opposite
+direction. Control messages on that socket are JSON text frames (`start`,
+`answer`, `hangup`, errors and selected `tx_format`/`rx_format`).
+
+Server-side lifecycle is authoritative. If the socket closes, the server
+unbinds the browser and stops the session so the ESP leg does not remain stuck
+in a call. Client-side `pagehide`/hidden-page cleanup is best effort UX, not
+the correctness guarantee.
+
+### 9.2 Call-state and reason flow
 
 ```mermaid
 stateDiagram-v2
@@ -489,12 +520,15 @@ Terminal reason rules:
 | How is a mic frame delivered to consumers? | `esphome/components/esp_audio_stack/esp_audio_stack.cpp` `audio_task_()` |
 | How does the AFE pipeline swap config without glitches? | `esphome/components/esp_afe/esp_afe.cpp` `recreate_instance_()` + drain protocol |
 | Where is the TCP wire format defined? | `esphome/components/intercom_api/intercom_protocol.h` |
+| Where is the HA audio-format model defined? | `custom_components/intercom_native/audio_format.py` |
+| Where does HA convert mismatched bridge audio? | `custom_components/intercom_native/audio_pcm.py` |
 | How is PSRAM vs internal RAM placement decided? | `esphome/components/audio_processor/ring_buffer_caps.h` |
 | How do I register a new mic consumer? | Call `ESPAudioStack::register_mic_consumer()` from the consumer's `setup()` |
 | How do I add a new processor implementation? | Subclass `AudioProcessor` in `esphome/components/audio_processor/audio_processor.h`, ship as a new component |
 | Where is the phonebook / dedup / endpoint policy? | `esphome/components/intercom_api/phonebook.h`, plus `_format_entry_unified` / `_async_build_peer_snapshot` in `custom_components/intercom_native/__init__.py` |
 | Where are HA services registered with their schemas? | `custom_components/intercom_native/__init__.py` (voluptuous, `extra=PREVENT_EXTRA`) |
 | Where does HA discover the announce IP it advertises? | `network.async_get_announce_addresses(hass)` in `custom_components/intercom_native/__init__.py` |
+| Where is browser binary audio handled? | `custom_components/intercom_native/websocket_api.py` `IntercomAudioWebSocketView`, plus `frontend/intercom-engine.js` |
 
 ---
 

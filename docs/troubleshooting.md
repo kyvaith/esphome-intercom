@@ -6,6 +6,10 @@ Common symptoms and fixes when setting up ESPHome Intercom.
 - [Card shows "No devices found"](#card-shows-no-devices-found)
 - [No audio from ESP speaker](#no-audio-from-esp-speaker)
 - [No audio from browser](#no-audio-from-browser)
+- [Card shows "audio websocket failed"](#card-shows-audio-websocket-failed)
+- [Card does not update for non-admin users](#card-does-not-update-for-non-admin-users)
+- [Call fails with `incompatible_audio_format`](#call-fails-with-incompatible_audio_format)
+- [UDP endpoint missing or rejected after enabling high-rate audio](#udp-endpoint-missing-or-rejected-after-enabling-high-rate-audio)
 - [Echo or feedback](#echo-or-feedback)
 - [High latency](#high-latency)
 - [ESP shows "Ringing" but browser doesn't connect](#esp-shows-ringing-but-browser-doesnt-connect)
@@ -46,9 +50,98 @@ Common symptoms and fixes when setting up ESPHome Intercom.
 3. Check browser console for AudioContext errors.
 4. Try a different browser (Chrome recommended).
 
+## Card shows "audio websocket failed"
+
+The current card uses `/api/intercom_native/ws` for authenticated binary audio.
+It no longer sends audio through HA's shared frontend WebSocket.
+
+Check these in order:
+
+1. Confirm the installed `intercom_native` backend and served card are from the
+   same release. The integration serves `/intercom-native/intercom-card.js`; a
+   stale browser cache can leave an old card talking to a new backend, or the
+   reverse. Hard-refresh the dashboard or clear the app WebView cache after an
+   upgrade.
+2. Open HA logs and look for `IntercomAudioWebSocketView`,
+   `invalid_audio_frame`, `connection_failed`, `busy`, `target_not_found` or
+   `unsupported_udp_audio_format`. These are integration errors and should be
+   handled before looking at ESP audio.
+3. Verify the browser user is authenticated to the same HA origin that serves
+   the dashboard. Reverse proxies must forward WebSocket upgrades to HA.
+4. If the error appears only after a failed/hung call, call
+   `intercom_native.hangup` on the affected ESP or HA softphone endpoint once.
+   The server owns teardown; a closed audio WebSocket should normally stop the
+   session automatically.
+
+## Card does not update for non-admin users
+
+Older development builds subscribed directly to HA's generic
+`subscribe_events` command for `intercom_native.call_event`. Home Assistant
+blocks arbitrary custom-event subscriptions for non-admin users and logs:
+
+```text
+Refusing to allow <user> to subscribe to event intercom_native.call_event
+```
+
+Current builds use the scoped `intercom_native/subscribe_call_events` websocket
+command instead. If you still see the generic-subscribe error:
+
+1. Update/redeploy `intercom_native`.
+2. Hard-refresh the dashboard so the browser loads the new
+   `intercom-engine.js`.
+3. Confirm the loaded card URL includes the current integration version/cache
+   stamp in HA Settings -> Dashboards -> Resources or the browser network tab.
+
+## Call fails with `incompatible_audio_format`
+
+This is an intentional protocol rejection: the caller TX format and callee RX
+format, or the reverse direction, have no common PCM format.
+
+Common causes:
+
+- A direct ESP-to-ESP call between native-audio devices whose
+  `tx_formats`/`rx_formats` do not intersect.
+- A custom phonebook row that advertises the wrong format.
+- UDP firmware advertising a format that HA rejected from the phonebook because
+  its frame is too large for one safe datagram.
+
+Fixes:
+
+1. Use HA as the bridge (`routing_mode: ha_pbx`) when two ESP legs need format
+   conversion.
+2. Use TCP for high-rate/stereo/32-bit PCM.
+3. Keep AFE/AEC-backed microphone branches at the esp-sr surface
+   `16000:s16le:1:32`; only native microphone/speaker branches should advertise
+   higher-rate formats.
+
+## UDP endpoint missing or rejected after enabling high-rate audio
+
+UDP audio is one complete negotiated PCM frame per datagram. HA rejects UDP
+endpoint rows whose advertised frame payload is above the safe datagram
+threshold instead of relying on IP fragmentation.
+
+Examples that exceed the UDP threshold:
+
+- `48000:s16le:1:32` = 3072 bytes per frame.
+- `48000:s32le:1:20` = 3840 bytes per frame.
+- Stereo or 32-bit containers grow even faster.
+
+Use one of these:
+
+- Switch that endpoint to TCP.
+- Lower the sample rate.
+- Use mono instead of stereo.
+- Use a smaller container where the hardware path allows it.
+- Use a shorter frame duration that still produces an integer number of
+  samples and fits under the safe payload threshold.
+
 ## Echo or feedback
 
-1. Enable AEC: create an audio processor and link it via `processor_id`. With `esp_audio_stack`, both `esp_aec` and `esp_afe` are supported. With `intercom_api` alone (no duplex in front), use `esp_aec` only.
+1. Enable AEC on the audio backend. With `esp_audio_stack`, create an
+   `esp_aec` or `esp_afe` processor and set `esp_audio_stack.processor_id`.
+   `intercom_api.processor_id` was removed; `intercom_api` should consume the
+   microphone/speaker facade exposed by `esp_audio_stack` when software
+   processing is needed.
 2. Ensure the AEC switch is ON in Home Assistant.
 3. Reduce Master Volume.
 4. Increase physical distance between mic and speaker.

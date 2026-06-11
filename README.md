@@ -110,6 +110,44 @@ _Runtime demo: browser softphone, ESP call state and audio controls moving toget
 
 ## What's New
 
+### 2026.6.3 - Binary softphone audio and negotiated PCM formats
+
+`2026.6.3` replaces the old browser JSON/base64 audio path with a dedicated,
+authenticated binary WebSocket and completes the first negotiated-audio-format
+pass across ESP firmware, Home Assistant and the Lovelace card.
+
+Changes since `2026.6.2`:
+
+- 🔌 Lovelace/browser audio now uses `/api/intercom_native/ws`, not Home
+  Assistant's shared frontend WebSocket. Audio frames are binary PCM, control
+  messages are compact JSON on the same session-bound socket, and server-side
+  socket close is authoritative: if the browser disappears, HA hangs up the ESP
+  leg.
+- 🧠 The card now uses one page-level audio engine. Multiple cards on the same
+  dashboard subscribe to that engine as views instead of creating independent
+  microphone/playback pipelines. A card mounted mid-call receives replayed call
+  state from the engine.
+- 🔐 Card call-state events now use the integration-scoped
+  `intercom_native/subscribe_call_events` websocket command. This avoids HA's
+  generic `subscribe_events` custom-event permission trap for non-admin users.
+- 🎚️ PBX-lite START/ANSWER now negotiate PCM per direction. The legacy default
+  remains `16000:s16le:1:32`; newer peers can advertise `s16le`, `s24le`,
+  `s24le_in_s32` and `s32le` at common rates up to 48 kHz when their real audio
+  source/sink supports it.
+- 🔁 Home Assistant bridge sessions perform explicit PCM conversion when two
+  legs negotiate different formats. Conversion includes channel mapping,
+  container conversion, sample-rate conversion and frame-duration reframing.
+- 📡 UDP endpoints advertise only formats that fit a complete PCM frame in one
+  safe datagram. Larger frames must use TCP or a smaller format/frame duration;
+  the project does not rely on IP fragmentation for realtime audio.
+- 🧾 HA services now validate target-bearing calls before handlers run. Empty
+  `call`, `hangup`, `decline`, `answer` or `forward` payloads fail schema
+  validation instead of producing resolver tracebacks.
+
+Upgrade note: custom clients using the removed JSON/base64 commands must move
+to the binary audio WebSocket before upgrading. See
+[`docs/BREAKING_CHANGES.md`](docs/BREAKING_CHANGES.md).
+
 ### 2026.6.2 - HA softphone and audio runtime stabilization
 
 `2026.6.2` is focused on the Lovelace HA softphone, runtime AFE controls,
@@ -395,6 +433,8 @@ phonebook, omit the HA phonebook subscription package.
 - **One product mode (PBX-lite)** with phonebook / contacts / destination / caller entities always exposed.
 - **Per-device routing**: `device_independent` (direct) or `ha_pbx` (HA bridges), runtime-toggleable.
 - **Dual transport (TCP + UDP)** with cross-protocol bridges. HA publishes one endpoint-first phonebook and bridges TCP <-> UDP. The Lovelace card is transport-agnostic.
+- **Negotiated PCM audio** - Legacy peers use `16000:s16le:1:32`; newer peers advertise per-direction `tx_formats`/`rx_formats` up to 48 kHz and 32-bit containers where the actual microphone/speaker path supports them.
+- **Dedicated browser audio socket** - The Lovelace softphone uses authenticated binary WebSocket audio on `/api/intercom_native/ws`; it no longer pushes base64 audio over HA's shared frontend WebSocket.
 - **Echo Cancellation (AEC)** - Built-in acoustic echo cancellation using ESP-SR. (ES8311 digital feedback mode provides perfect sample-accurate echo cancellation.)
 - **Full Audio Front-End (AFE)** - Complete ESP-SR AFE pipeline via `esp_afe`:
   - **Single-mic (MR)**: AEC + Noise Suppression + VAD + AGC.
@@ -404,7 +444,7 @@ phonebook, omit the HA phonebook subscription package.
 - **Voice Assistant compatible** - Coexists with ESPHome Voice Assistant and Micro Wake Word.
 - **Ready-to-flash YAML configs** - Optimized configurations for real, tested hardware combining Voice Assistant, Micro Wake Word and Intercom on the same device.
 - **Auto Answer** - Configurable automatic call acceptance (ESP-side switch + browser card checkbox).
-- **HA Services** - `intercom_native.answer`, `decline` (with optional `reason`), `hangup`, `call`, `forward`, `purge_devices`. All registered with explicit `voluptuous` schemas (`extra=PREVENT_EXTRA`); missing target raises `ServiceValidationError`.
+- **HA Services** - `intercom_native.answer`, `decline` (with optional `reason`), `hangup`, `call`, `forward`, `purge_devices`. All registered with explicit `voluptuous` schemas (`extra=PREVENT_EXTRA`); empty target-bearing calls fail schema validation before handlers run.
 - **Call Forwarding** - Forward active or ringing calls to another device via automation.
 - **Ringtone on incoming calls** - Devices play a looping ringtone while ringing.
 - **Volume Control** - Adjustable Master Volume and microphone gain.
@@ -440,7 +480,7 @@ flowchart TD
         Audio["🎙️ mic / speaker<br/>AEC or AFE"]
     end
 
-    Browser <-->|"JSON + PCM<br/>over WebSocket"| WS
+    Browser <-->|"binary PCM + control<br/>/api/intercom_native/ws"| WS
     WS --> Router
     Router --> TCP
     Router --> UDP
@@ -473,6 +513,12 @@ sample_rate:pcm_format:channels:frame_ms
 Supported PCM containers are `s16le`, `s24le`, `s24le_in_s32` and `s32le`.
 Supported rates are 8, 12, 16, 24, 32, 44.1 and 48 kHz, with 10/20/32 ms
 frames when the frame contains an integer number of samples.
+
+Home Assistant may bridge different formats by explicit PCM conversion; direct
+ESP-to-ESP calls require a common format and fail clearly when none exists. UDP
+audio still carries exactly one complete PCM frame per datagram. Formats whose
+frame payload is above the safe datagram threshold are rejected for UDP; use TCP
+for high-rate, stereo or 32-bit frames.
 
 ### TCP protocol (default `tcp_port: 6054`)
 

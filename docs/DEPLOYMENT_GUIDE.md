@@ -47,7 +47,7 @@ Follow the first branch that matches your hardware and intent.
 
 4. **Network transport: TCP (default), UDP, or both?**
    - **TCP** (default): framed PBX-lite protocol on `tcp_port` (default 6054). Start here for routed networks, VLANs, HA Container/Docker installs, Wi-Fi segments with filtering, or any deployment where predictable delivery matters more than shaving protocol overhead.
-   - **UDP**: pick the matching `*-udp.yaml` variant from the same tier as the TCP file (`intercom-only` or `full-experience/single-bus`). Audio on `udp_audio_port` (default 6054, different protocol stack from TCP), control on `udp_control_port` (default 6055). Same `MessageHeader` framing on the control socket as TCP, raw L16 PCM on the audio socket. UDP is a good fit for simple LANs where low latency is the priority and the network passes the audio/control ports cleanly; packet loss is audible because audio datagrams are not retransmitted.
+   - **UDP**: pick the matching `*-udp.yaml` variant from the same tier as the TCP file (`intercom-only` or `full-experience/single-bus`). Audio on `udp_audio_port` (default 6054, different protocol stack from TCP), control on `udp_control_port` (default 6055). Same `MessageHeader` framing on the control socket as TCP, raw negotiated PCM on the audio socket. UDP is a good fit for simple LANs where low latency is the priority and the network passes the audio/control ports cleanly; packet loss is audible because audio datagrams are not retransmitted.
    - The HA `Intercom Native` integration can serve **both protocols at the same time**: tick `use_tcp` and/or `use_udp` in the config flow (defaults: TCP on, UDP off). HA acts as the bridge for cross-protocol calls.
 
 ### Cross-protocol bridges (TCP <-> UDP)
@@ -79,6 +79,42 @@ What you can mix (HA handles the bridge automatically):
 | UDP | TCP | UDP source leg + TCP dest leg, audio queued through HA |
 | UDP | UDP | both legs share HA's UDP socket manager |
 
+### Audio format deployment rules
+
+The intercom transport is no longer globally fixed to 16 kHz/s16. Audio format
+is derived from the real component attached to each direction:
+
+| Direction source/sink | Published format behavior |
+|---|---|
+| `esp_afe` / `esp_aec` processed microphone output | 16 kHz, s16, mono; this is the Espressif esp-sr surface. |
+| Native ESPHome microphone/speaker path | The declared component format, if it is one of the supported intercom formats. |
+| HA browser softphone TX | Mono formats supported by the browser engine. |
+| HA browser softphone RX | Mono/stereo formats supported by the browser engine. |
+
+Formats are per direction, not per device. A full-duplex device can transmit
+`16000:s16le:1:32` from its AFE mic branch while receiving a different format
+on its native speaker branch. START advertises the caller's TX/RX capabilities;
+ANSWER confirms the exact caller-to-destination and destination-to-caller
+formats selected for that call.
+
+Home Assistant bridge sessions can convert between different negotiated leg
+formats. The converter handles:
+
+- sample-rate conversion;
+- PCM container conversion (`s16le`, `s24le`, `s24le_in_s32`, `s32le`);
+- mono/stereo channel mapping;
+- frame-duration reframing when source and destination `frame_ms` differ.
+
+Direct ESP-to-ESP calls do not have HA in the media path. Those calls require a
+common format between caller TX and callee RX, and between callee TX and caller
+RX. If no common format exists, the call is rejected with
+`incompatible_audio_format` instead of falling back silently.
+
+UDP carries one complete PCM frame per datagram. Any UDP endpoint format whose
+frame payload is above the safe datagram threshold is rejected by HA during
+phonebook parsing. Use TCP for high-rate/stereo/32-bit formats or lower the
+rate, channel count, container size or frame duration for UDP.
+
 ### go2rtc as an optional secondary consumer
 
 Audio path HA <-> ESP runs natively on UDP; **go2rtc is not required**.
@@ -93,6 +129,9 @@ streams:
 ```
 
 Caveats:
+- The `ffmpeg` `-f/-ar/-ac` arguments must match the negotiated PCM format on
+  the tapped endpoint. The example above is only correct for
+  `16000:s16le:1:*`.
 - The ESP audio socket binds **only during a call** (lazy lifecycle). Pair go2rtc with HA "snapshot on call" or similar so the consumer is up at the right time.
 - This is one-way (ESP -> go2rtc). The go2rtc backchannel (browser -> ESP audio) goes through the Intercom Native card path on the HA side, not through go2rtc, to avoid the WebRTC/Opus transcode hop.
 - HA 2024.11+ ships go2rtc bundled - no manual install. HASSOS friendly.

@@ -75,6 +75,12 @@ Name|udp|ip|udp_audio_port|udp_control_port|audio_mode|tx_formats|rx_formats
 sample_rate:pcm_format:channels:frame_ms
 ```
 
+Each list may contain up to 8 formats, ordered by endpoint preference. The
+first compatible format selected by the constrained side wins during START /
+ANSWER negotiation. `pcm_format` is the source of truth for container size and
+significant bits; do not treat it as independent from a separate
+`bits_per_sample` field.
+
 Example:
 
 ```text
@@ -84,7 +90,8 @@ Panel|tcp|192.168.1.40|6054|full_duplex|16000:s16le:1:32|48000:s32le:1:20
 Missing capability fields mean the legacy format `16000:s16le:1:32`. For UDP
 rows every advertised frame must fit in one safe datagram; HA rejects UDP
 formats above the safe payload threshold instead of relying on IP
-fragmentation.
+fragmentation. TCP rows may advertise larger frames because TCP carries framed
+payloads and does not depend on datagram MTU.
 
 `ha` is a bridge/role marker. Its row carries both HA transport endpoints so TCP
 firmware can shape it to `Name|tcp|ip|tcp_port` and UDP firmware can shape it to

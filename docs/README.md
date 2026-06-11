@@ -9,15 +9,21 @@ Welcome. These pages cover everything beyond the project pitch on the [top-level
 - **Quick start examples**: the top-level [README](../README.md#quick-start-examples) now includes practical doorbell, room-to-room intercom, and manual boot phonebook examples.
 
 - **Release / upgrade notes**: [BREAKING_CHANGES.md](BREAKING_CHANGES.md)
-  starts with the `2026.6.2` stabilization notes and keeps upgrade
-  risks out of the main README. [RELEASE_2026_5_0.md](RELEASE_2026_5_0.md)
+  starts with the `2026.6.3` binary-softphone and negotiated-audio notes and
+  keeps upgrade risks out of the main README. [RELEASE_2026_5_0.md](RELEASE_2026_5_0.md)
   contains the earlier "From PBX-like to PBX-lite" release note.
 
 - **Media refresh plan**: [MEDIA_SHOT_LIST.md](MEDIA_SHOT_LIST.md) lists the screenshots, photos, GIFs and demo scenes that should replace the obsolete README media.
 
 - **Configuration reference**: [reference.md](reference.md) covers every `intercom_api`, `esp_aec` and `esp_afe` option, every action and condition, the Home Assistant services, and worked automation examples.
 
-- **Wire protocol**: [INTERCOM_PROTOCOL.md](INTERCOM_PROTOCOL.md) is the authoritative PBX-lite frame/reason/error contract shared by the ESP C++ and HA Python implementations.
+- **Wire protocol**: [INTERCOM_PROTOCOL.md](INTERCOM_PROTOCOL.md) is the
+  authoritative PBX-lite frame/reason/error/audio-format contract shared by the
+  ESP C++ and HA Python implementations.
+
+- **Phonebook protocol**: [PHONEBOOK_PROTOCOL.md](PHONEBOOK_PROTOCOL.md)
+  documents canonical endpoint rows, `audio_mode`, `tx_formats`/`rx_formats`
+  and how HA shapes TCP/UDP/HA rows for each ESP.
 
 - **How the audio stack works**: [ARCHITECTURE.md](ARCHITECTURE.md) describes component decomposition, the threading and core-affinity model, the data flow per frame, the `audio_processor` contract, and the drain protocol for glitch-free config changes.
 

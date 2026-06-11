@@ -23,6 +23,25 @@ The server now owns softphone teardown. If the browser tab, Companion App view
 or WebSocket disappears, Home Assistant stops the bound intercom session and
 hangs up the ESP leg instead of waiting for client-side cleanup.
 
+The card also no longer uses Home Assistant's generic `subscribe_events`
+command for `intercom_native.call_event`. HA intentionally blocks arbitrary
+custom-event subscriptions for non-admin users; the card now uses the scoped
+`intercom_native/subscribe_call_events` command registered by this integration.
+This preserves the same card behavior without requiring dashboard users to be
+administrators.
+
+Service calls that require a target now validate that target before their
+handler runs. Empty payloads for `intercom_native.call`, `hangup`, `decline`,
+`answer` or `forward` return a service-schema error instead of producing a
+resolver traceback in the HA log. `purge_devices` remains intentionally usable
+without a target so it can purge all stale intercom devices.
+
+Audio negotiation is per direction. A device can publish different `tx_formats`
+and `rx_formats`; for example, an AFE-backed microphone branch may remain
+`16000:s16le:1:32` while a native speaker branch accepts a higher-rate format.
+Home Assistant can bridge mismatched legs by explicit PCM conversion. Direct
+ESP-to-ESP calls require a common format and reject cleanly when none exists.
+
 ## 2026.6.2: HA softphone and full-device runtime cleanup
 
 `2026.6.2` documents only changes from `2026.6.1`. The PBX-lite phonebook

@@ -60,15 +60,35 @@ The HA peer name in every phonebook is `hass.config.location_name` (NEVER hardco
 |--------|------|---------|-------------|
 | `id` | ID | Required | Component ID |
 | `mode` | string | _unset_ (PBX-lite) | Optional opt-in. Only accepted value: `raw_udp` (audio-only UDP, no signaling). Omit for the default PBX-lite behaviour. |
+| `protocol` | string | `tcp` | PBX-lite transport: `tcp` for framed signaling/audio on one socket, or `udp` for framed control + raw negotiated PCM audio datagrams. |
 | `routing_mode` | string | `device_independent` | Per-device routing policy. `device_independent` dials peers directly; `ha_pbx` dials the HA peer named by `hass.config.location_name` and lets HA bridge. |
+| `audio.tx.sample_rate` | int | `16000` | Microphone/source -> wire sample rate. Supported: 8000, 12000, 16000, 24000, 32000, 44100, 48000. |
+| `audio.tx.pcm_format` | string | `s16le` | Microphone/source -> wire PCM container: `s16le`, `s24le`, `s24le_in_s32`, `s32le`. |
+| `audio.tx.channels` | int | `1` | Microphone/source -> wire channel count, 1 or 2. |
+| `audio.tx.frame_ms` | int | `32` | TX frame duration, 10/20/32 ms only when it produces an integer number of samples. |
+| `audio.rx.sample_rate` | int | `16000` | Wire -> speaker/sink sample rate. Same supported values as TX. |
+| `audio.rx.pcm_format` | string | `s16le` | Wire -> speaker/sink PCM container. Same supported values as TX. |
+| `audio.rx.channels` | int | `1` | Wire -> speaker/sink channel count, 1 or 2. |
+| `audio.rx.frame_ms` | int | `32` | RX frame duration, 10/20/32 ms only when it produces an integer number of samples. |
 | `announce` | bool | `false` | Opt-in ESP-side mDNS announce for ESP-only deployments. Standard HA-managed YAMLs leave this disabled. |
 | `discovery.mdns` | bool/map | `false` | Opt-in ESP-side peer discovery. Reads TXT `endpoint=<Name|protocol|ip|ports>` from `_intercom-tcp._tcp` / `_intercom-udp._udp` services and merges matching peers into the phonebook. |
-| `microphone` | ID | Required | Reference to microphone component. |
-| `speaker` | ID | Required | Reference to speaker component. |
-| `processor_id` | ID | - | Reference to an `esp_aec` component. Must be `esp_aec`, not `esp_afe`: when `intercom_api` drives its own mic (no `esp_audio_stack` in front), the AFE feed/fetch pipeline cannot be fed correctly. Accepts any `AudioProcessor` implementation at the type level, but only `esp_aec` is supported in practice. |
-| `dc_offset_removal` | bool | false | Remove DC offset (for mics like SPH0645). |
+| `microphone` | ID | Optional | Direct ESPHome microphone component. Use when it already publishes the configured `audio.tx` format. |
+| `microphone_source` | map | Optional | ESPHome `MicrophoneSource` wrapper for channel/bit-depth/gain conversion before intercom TX. Use only one of `microphone` or `microphone_source`. |
+| `speaker` | ID | Optional | ESPHome speaker component that accepts the configured `audio.rx` format. |
+| `processor_id` | invalid | removed | `intercom_api.processor_id` is intentionally rejected. Put software AEC/AFE on `esp_audio_stack` and pass its microphone/speaker facade here. |
+| `dc_offset_removal` | bool | false | Remove DC offset for s16le mic sources with significant DC bias. Rejected with `esp_audio_stack.correct_dc_offset` to avoid duplicate filters. |
+| `audio_debug` | bool | false | Targeted PCM peak/RMS logging on intercom TX/RX. Keep disabled outside audio-level tests. |
+| `buffers_in_psram` | bool | false | Place intercom-owned staging buffers in PSRAM where supported. |
 | `ringing_timeout` | time | 0s | Auto-decline after timeout (0 = disabled). |
-| `task_stacks_in_psram` | bool | false | Place intercom task stacks in PSRAM: TCP server or UDP recv/control, plus TX. The standalone direct speaker task exists only when `intercom_api.processor_id` is used without `esp_audio_stack`. Requires PSRAM and `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY: "y"`. Default false keeps plain ESP32 builds valid. |
+| `calling_timeout` | time | component default | Timeout for outgoing setup before returning to idle. |
+| `task_stacks_in_psram` | bool | false | Place intercom task stacks in PSRAM: TCP server or UDP recv/control, plus TX when a microphone path exists. Requires PSRAM and `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY: "y"`. Default false keeps plain ESP32 builds valid. |
+| `auto_entities` | bool | false | Create common HA entities automatically for minimal YAMLs. Maintained YAMLs usually declare them through packages for stable names. |
+| `network_socket_headroom` | int | 0 | Validation-only socket reservation headroom for full-experience firmware with overlapping HA API/logging/media/intercom traffic. |
+
+`audio.tx` and `audio.rx` are independent. An AFE-backed microphone branch
+should normally keep TX at `16000:s16le:1:32`, while a native speaker branch may
+receive a different supported format. UDP validates that every advertised TX/RX
+frame fits in one safe datagram; use TCP for larger frames.
 
 ## Event callbacks
 
@@ -142,7 +162,12 @@ Two audio processing components are available, both implementing the `AudioProce
   - **Dual-mic (MMR/MMNR)**: AEC + structural Speech Enhancement/BSS (~120 KB internal RAM). Public dual-mic profiles keep AGC disabled and expose only live AEC/VAD controls
   - Runtime toggle switches, diagnostic sensors, and mode switching in Home Assistant
 
-They are drop-in replacements **only behind `esp_audio_stack`**, which feeds the processor with the fixed 512-sample 16 kHz frames that `esp_afe` requires. When `intercom_api` talks to the processor directly (no `esp_audio_stack`, typical of dual-bus MEMS + I2S amp setups), use `esp_aec` only. The AFE pipeline needs a stable producer task that `intercom_api`'s standalone mic path does not provide.
+They are drop-in replacements **only behind `esp_audio_stack`**, which feeds the
+processor with the fixed 512-sample 16 kHz frames that `esp_afe` requires.
+`intercom_api.processor_id` was removed; standalone native-audio intercom
+setups should bind `intercom_api` directly to ESPHome microphone/speaker
+components, while software AEC/AFE setups should put the processor on
+`esp_audio_stack` and pass its microphone/speaker facade to `intercom_api`.
 
 ### Modularity rule
 
@@ -371,7 +396,12 @@ enable ESP-side mDNS discovery to make HA reachable.
 
 ## Home Assistant services
 
-All services use **target device selectors** so devices come from a dropdown in the automation editor. They register with explicit `voluptuous` schemas (`extra=PREVENT_EXTRA`), so unknown fields fail at submission. Missing target raises `ServiceValidationError` (UI surfaces the error; no silent no-op).
+All services use **target device selectors** so devices come from a dropdown in
+the automation editor. They register with explicit `voluptuous` schemas
+(`extra=PREVENT_EXTRA`), so unknown fields fail at submission. Services that
+require a target reject empty payloads at schema validation before the handler
+runs; a target that resolves to no intercom device raises a Home Assistant
+service validation error. There is no silent no-op for malformed calls.
 
 ### Available services
 

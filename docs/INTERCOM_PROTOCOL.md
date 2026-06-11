@@ -194,6 +194,44 @@ UDP formats whose frame payload exceeds 1200 bytes are rejected with
 `unsupported_udp_audio_format`. Use TCP or lower sample rate/channel/container
 size/frame duration for larger PCM formats.
 
+Home Assistant bridge conversion is explicit. When HA is in the media path and
+the two legs negotiate different formats, HA converts PCM between the selected
+source-leg output format and destination-leg input format. This conversion is
+not part of the ESP wire protocol and is not a silent fallback for direct
+ESP-to-ESP calls. Direct calls require common formats and reject the call when
+the intersection is empty.
+
+## Browser Audio WebSocket
+
+The Lovelace softphone does not use the shared HA frontend WebSocket for audio.
+It opens the authenticated endpoint:
+
+```text
+/api/intercom_native/ws?device_id=<device_id>
+```
+
+This socket is session-bound. Binary messages are:
+
+```text
+type:    u8 = 1  # AUDIO
+payload: one complete negotiated PCM frame
+```
+
+Text messages are JSON controls such as `start`, `ha_softphone_start`,
+`answer`, `answer_esp_call`, `hangup` and error/state replies. Successful setup
+replies include `tx_format` and `rx_format` tokens so the browser worklets know
+exactly how to encode capture and decode playback.
+
+If the browser WebSocket closes, HA stops the bound session and hangs up the ESP
+leg. This is intentional: a dropped browser audio socket ends the call cleanly
+instead of trying to reconnect mid-call.
+
+Dashboard call-state updates use the scoped
+`intercom_native/subscribe_call_events` HA WebSocket command. Cards should not
+subscribe directly to HA's generic `subscribe_events` stream for
+`intercom_native.call_event`, because Home Assistant blocks arbitrary custom
+event subscriptions for non-admin users.
+
 ## Keepalive
 
 PING/PONG bodies are one byte: `00`. The current ESP constants use a 5 second
