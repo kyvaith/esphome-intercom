@@ -95,6 +95,9 @@ class AudioFormat:
     def udp_safe(self) -> bool:
         return self.nominal_frame_bytes <= UDP_SAFE_PAYLOAD_BYTES
 
+    def fits_udp_payload(self, max_payload: int = UDP_SAFE_PAYLOAD_BYTES) -> bool:
+        return self.nominal_frame_bytes <= max_payload
+
     def wire_tuple(self) -> tuple[int, int, int, int]:
         return (self.sample_rate, self.format_id, self.channels, self.frame_ms)
 
@@ -170,12 +173,17 @@ def parse_audio_format_list(value: str | None) -> list[AudioFormat]:
     return formats
 
 
-def require_udp_safe_formats(formats: list[AudioFormat], *, context: str) -> list[AudioFormat]:
-    oversized = [fmt for fmt in formats if not fmt.udp_safe]
+def require_udp_safe_formats(
+    formats: list[AudioFormat],
+    *,
+    context: str,
+    max_payload: int = UDP_SAFE_PAYLOAD_BYTES,
+) -> list[AudioFormat]:
+    oversized = [fmt for fmt in formats if not fmt.fits_udp_payload(max_payload)]
     if oversized:
         examples = ", ".join(f"{fmt.wire_token()} ({fmt.nominal_frame_bytes} bytes)" for fmt in oversized[:3])
         raise ValueError(
-            f"{context} contains UDP audio frames above {UDP_SAFE_PAYLOAD_BYTES} bytes: {examples}; "
+            f"{context} contains UDP audio frames above {max_payload} bytes: {examples}; "
             "use TCP or lower sample_rate/channels/bit depth/frame_ms"
         )
     return formats

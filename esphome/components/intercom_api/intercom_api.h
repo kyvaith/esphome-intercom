@@ -125,6 +125,7 @@ class IntercomApi : public Component {
   void set_remote_port(uint16_t port) { this->remote_port_ = port; }
   void set_listen_port(uint16_t port) { this->listen_port_ = port; }
   void set_control_port(uint16_t port) { this->control_port_ = port; }
+  void set_udp_max_payload(size_t bytes) { this->udp_max_payload_ = bytes; }
   void set_tcp_port(uint16_t port) { this->tcp_port_ = port; }
   uint16_t get_tcp_port() const { return this->tcp_port_; }
   std::string get_endpoint() const { return this->build_endpoint_string_(); }
@@ -470,6 +471,7 @@ class IntercomApi : public Component {
   uint16_t remote_control_port_{0};  // UDP: peer control port, 0 = local control_port_
   uint16_t listen_port_{6054};     // UDP: local audio listen port
   uint16_t control_port_{6055};    // UDP: local control listen port
+  size_t udp_max_payload_{UDP_SAFE_AUDIO_PAYLOAD_BYTES};
   uint16_t tcp_port_{6054};        // TCP: server listen + outbound originate
   IntercomRoutingMode routing_mode_{IntercomRoutingMode::DEVICE_INDEPENDENT};
 

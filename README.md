@@ -138,8 +138,10 @@ Changes since `2026.6.2`:
   legs negotiate different formats. Conversion includes channel mapping,
   container conversion, sample-rate conversion and frame-duration reframing.
 - 📡 UDP endpoints advertise only formats that fit a complete PCM frame in one
-  safe datagram. Larger frames must use TCP or a smaller format/frame duration;
-  the project does not rely on IP fragmentation for realtime audio.
+  configured datagram. The default `udp_max_payload` is 1200 bytes and does
+  not rely on IP fragmentation for realtime audio. Larger frames must use TCP,
+  a smaller format/frame duration, or an explicit `udp_max_payload` override
+  on both HA and ESPHome after verifying the LAN path.
 - 🧾 HA services now validate target-bearing calls before handlers run. Empty
   `call`, `hangup`, `decline`, `answer` or `forward` payloads fail schema
   validation instead of producing resolver tracebacks.
@@ -559,12 +561,34 @@ UDP firmware variants (`*-intercom-udp.yaml`) carry the same `MessageHeader` fra
 
 | Port | Direction | Payload |
 |------|-----------|---------|
-| `udp_audio_port` (default 6054, different protocol stack from TCP) | bidirectional | Raw negotiated PCM, 1 datagram = 1 complete frame. No header. Formats above the safe datagram threshold are rejected; use TCP for larger 48 kHz / 32-bit frames. |
+| `udp_audio_port` (default 6054, different protocol stack from TCP) | bidirectional | Raw negotiated PCM, 1 datagram = 1 complete frame. No header. Formats above `udp_max_payload` are rejected; use TCP for larger 48 kHz / 32-bit frames unless your LAN is configured for larger datagrams. |
 | `udp_control_port` (default 6055) | bidirectional | `MessageHeader` (3 B) + payload, identical layout and Message Types to TCP above. |
 
 The audio socket is **lazy**: bound on the ESP only while the FSM is streaming/answering, never while idle. The control socket stays bound from boot so inbound `MSG_START` can wake the FSM (incoming-call ringing).
 
 On the HA side a single UDP socket manager binds `udp_audio_port` / `udp_control_port` once and demultiplexes inbound datagrams by source IP to the right per-host client. Two simultaneous UDP legs share the same socket pair without `EADDRINUSE` collisions.
+
+UDP audio defaults to **1200 bytes of PCM payload per frame**. A normal LAN MTU
+of 1500 bytes is not 1500 bytes of usable UDP audio: IPv4 leaves 1472 bytes for
+UDP payload, IPv6 leaves 1452 bytes, and overlays can reduce that further. The
+project keeps a conservative 1200-byte ceiling so UDP profiles work on typical
+home LANs without depending on IP fragmentation.
+
+Advanced LANs can raise this with `udp_max_payload` on both sides:
+
+```yaml
+# ESPHome, only for protocol: udp
+intercom_api:
+  protocol: udp
+  udp_max_payload: 9000
+```
+
+In Home Assistant, set the same value in the Intercom Native integration
+options. This is an explicit opt-in for networks where you have verified larger
+UDP datagrams end to end. If a UDP `audio.tx` or `audio.rx` frame exceeds the
+configured limit, ESPHome validation fails the build and HA rejects the peer
+with `unsupported_udp_audio_format`. For high-rate, stereo or 32-bit audio on
+ordinary networks, use TCP or shorten `frame_ms`.
 
 Transport choice is an installation choice, not a feature split. TCP is the
 recommended starting point for routed networks and HA/container deployments

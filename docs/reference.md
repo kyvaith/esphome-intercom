@@ -61,6 +61,7 @@ The HA peer name in every phonebook is `hass.config.location_name` (NEVER hardco
 | `id` | ID | Required | Component ID |
 | `mode` | string | _unset_ (PBX-lite) | Optional opt-in. Only accepted value: `raw_udp` (audio-only UDP, no signaling). Omit for the default PBX-lite behaviour. |
 | `protocol` | string | `tcp` | PBX-lite transport: `tcp` for framed signaling/audio on one socket, or `udp` for framed control + raw negotiated PCM audio datagrams. |
+| `udp_max_payload` | int | `1200` | Validation limit for one raw UDP audio datagram. Applies only with `protocol: udp`; raise only when the LAN path is known to pass larger datagrams. |
 | `routing_mode` | string | `device_independent` | Per-device routing policy. `device_independent` dials peers directly; `ha_pbx` dials the HA peer named by `hass.config.location_name` and lets HA bridge. |
 | `audio.tx.sample_rate` | int | `16000` | Microphone/source -> wire sample rate. Supported: 8000, 12000, 16000, 24000, 32000, 44100, 48000. |
 | `audio.tx.pcm_format` | string | `s16le` | Microphone/source -> wire PCM container: `s16le`, `s24le`, `s24le_in_s32`, `s32le`. |

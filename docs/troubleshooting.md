@@ -128,12 +128,26 @@ Fixes:
 ## UDP endpoint missing or rejected after enabling high-rate audio
 
 UDP audio is one complete negotiated PCM frame per datagram. HA rejects UDP
-endpoint rows whose advertised frame payload is above the safe datagram
-threshold instead of relying on IP fragmentation.
+endpoint rows whose advertised frame payload is above `udp_max_payload` instead
+of relying on IP fragmentation.
+
+The default threshold is 1200 bytes of UDP payload. This is lower than the
+common 1500-byte LAN MTU on purpose: 1500 includes IP and UDP headers, IPv6 has
+a larger header than IPv4, and VLAN/VPN/tunnel overhead can reduce the
+effective path MTU. Intercom UDP chooses reliability over squeezing the last
+bytes out of one LAN segment. Advanced LANs can raise `udp_max_payload` on both
+the ESPHome YAML and the HA integration options.
+
+Examples that fit:
+
+- `16000:s16le:1:32` = 1024 bytes per frame.
+- `24000:s16le:1:20` = 960 bytes per frame.
+- `48000:s16le:1:10` = 960 bytes per frame.
 
 Examples that exceed the UDP threshold:
 
 - `48000:s16le:1:32` = 3072 bytes per frame.
+- `48000:s16le:1:20` = 1920 bytes per frame.
 - `48000:s32le:1:20` = 3840 bytes per frame.
 - Stereo or 32-bit containers grow even faster.
 
@@ -225,6 +239,12 @@ package instead of manually writing only a `Name|ha|...` contact at boot.
 - **HA Container (Docker)**: must be started with `--network=host` (also recommended by official HA docs). Bridge mode would require manual port forwarding for `tcp_port` / `udp_audio_port` / `udp_control_port` plus mDNS reflector + `network: announced_addresses` override (not recommended).
 - **HA Core in venv**: listens directly on the host LAN, no extra config.
 - Port already in use: change `tcp_port` / `udp_audio_port` / `udp_control_port` in the integration options. Defaults are 6054 / 6054 / 6055 (TCP and UDP audio share number 6054 on different protocol stacks).
+- `unsupported_udp_audio_format`: the negotiated PCM frame is larger than the
+  configured UDP payload limit. Default is 1200 bytes to avoid IP
+  fragmentation. Use TCP, reduce `frame_ms` / sample rate / channels /
+  container size, or raise `udp_max_payload` on both the ESPHome YAML and the
+  Intercom Native HA options after verifying your LAN supports larger UDP
+  datagrams end to end.
 
 ## WARN: cannot determine HA announce IP
 

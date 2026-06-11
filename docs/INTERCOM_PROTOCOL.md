@@ -189,10 +189,22 @@ header length is `u16`, so the protocol limit is 65535 bytes; implementations
 allocate only the negotiated frame size.
 
 UDP audio datagrams carry one complete negotiated PCM frame without the 3-byte
-header. The implementation intentionally avoids relying on IP fragmentation:
-UDP formats whose frame payload exceeds 1200 bytes are rejected with
-`unsupported_udp_audio_format`. Use TCP or lower sample rate/channel/container
-size/frame duration for larger PCM formats.
+header. The implementation intentionally avoids relying on IP fragmentation by
+default: UDP formats whose frame payload exceeds `udp_max_payload` are rejected
+with `unsupported_udp_audio_format`.
+
+The default `udp_max_payload` is 1200 bytes. This is a conservative UDP payload
+limit, not a jumbo-frame limit. A standard Ethernet/Wi-Fi MTU of 1500 bytes
+still includes IP and UDP headers: IPv4 leaves 1472 bytes for UDP payload, IPv6
+leaves 1452 bytes, and VLAN/VPN/tunnel overhead can lower the real path MTU.
+Intercom keeps the default below that area so one lost IP fragment cannot
+discard a whole audio frame.
+
+Installations with a verified larger LAN path may raise `udp_max_payload` in
+both the ESPHome `intercom_api` YAML and the Home Assistant integration
+options. Larger PCM frames belong on TCP unless the operator deliberately opts
+into larger UDP datagrams or UDP packetization is introduced in a future
+protocol version.
 
 Home Assistant bridge conversion is explicit. When HA is in the media path and
 the two legs negotiate different formats, HA converts PCM between the selected

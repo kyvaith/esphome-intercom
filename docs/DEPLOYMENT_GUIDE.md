@@ -47,7 +47,7 @@ Follow the first branch that matches your hardware and intent.
 
 4. **Network transport: TCP (default), UDP, or both?**
    - **TCP** (default): framed PBX-lite protocol on `tcp_port` (default 6054). Start here for routed networks, VLANs, HA Container/Docker installs, Wi-Fi segments with filtering, or any deployment where predictable delivery matters more than shaving protocol overhead.
-   - **UDP**: pick the matching `*-udp.yaml` variant from the same tier as the TCP file (`intercom-only` or `full-experience/single-bus`). Audio on `udp_audio_port` (default 6054, different protocol stack from TCP), control on `udp_control_port` (default 6055). Same `MessageHeader` framing on the control socket as TCP, raw negotiated PCM on the audio socket. UDP is a good fit for simple LANs where low latency is the priority and the network passes the audio/control ports cleanly; packet loss is audible because audio datagrams are not retransmitted.
+   - **UDP**: pick the matching `*-udp.yaml` variant from the same tier as the TCP file (`intercom-only` or `full-experience/single-bus`). Audio on `udp_audio_port` (default 6054, different protocol stack from TCP), control on `udp_control_port` (default 6055). Same `MessageHeader` framing on the control socket as TCP, raw negotiated PCM on the audio socket. UDP is a good fit for simple LANs where low latency is the priority and the network passes the audio/control ports cleanly; packet loss is audible because audio datagrams are not retransmitted. The default `udp_max_payload` is 1200 bytes; raise it in both ESPHome YAML and HA integration options only after verifying larger UDP datagrams on your LAN.
    - The HA `Intercom Native` integration can serve **both protocols at the same time**: tick `use_tcp` and/or `use_udp` in the config flow (defaults: TCP on, UDP off). HA acts as the bridge for cross-protocol calls.
 
 ### Cross-protocol bridges (TCP <-> UDP)
@@ -111,9 +111,17 @@ RX. If no common format exists, the call is rejected with
 `incompatible_audio_format` instead of falling back silently.
 
 UDP carries one complete PCM frame per datagram. Any UDP endpoint format whose
-frame payload is above the safe datagram threshold is rejected by HA during
-phonebook parsing. Use TCP for high-rate/stereo/32-bit formats or lower the
-rate, channel count, container size or frame duration for UDP.
+frame payload is above the configured `udp_max_payload` is rejected by HA
+during phonebook parsing. Use TCP for high-rate/stereo/32-bit formats or lower
+the rate, channel count, container size or frame duration for UDP.
+
+The default threshold is 1200 bytes of PCM payload per frame. It is deliberately
+below the 1500-byte LAN MTU because MTU includes IP/UDP headers and may be
+reduced by IPv6, VLANs, VPNs or tunnels. This keeps UDP audio to one
+unfragmented datagram on ordinary home networks. ESPHome also checks this at
+compile time for UDP YAMLs and fails with a clear error if `audio.tx` or
+`audio.rx` is too large. Advanced LANs can raise `udp_max_payload` in both the
+ESPHome YAML and the HA integration options.
 
 ### go2rtc as an optional secondary consumer
 
@@ -215,6 +223,7 @@ Default ports (configurable from the integration config flow):
 | `tcp_port` | PBX-lite framed TCP | 6054 |
 | `udp_audio_port` | Raw negotiated PCM audio | 6054 (different protocol stack from TCP) |
 | `udp_control_port` | UDP `MessageHeader` signaling | 6055 |
+| `udp_max_payload` | Maximum raw PCM bytes per UDP audio datagram | 1200 |
 
 If `network.async_get_announce_addresses(hass)` returns empty, the integration logs a WARN: HA cannot enter the phonebook as a peer, so ESPs in `routing_mode: ha_pbx` cannot route until you configure either `network: announced_addresses:` or an `external_url`. Direct (`device_independent`) routing is unaffected.
 

@@ -81,10 +81,12 @@ class IntercomUdpSocketManager:
         hass: HomeAssistant,
         audio_port: int = INTERCOM_UDP_AUDIO_PORT,
         control_port: int = INTERCOM_UDP_CONTROL_PORT,
+        max_payload: int = UDP_SAFE_PAYLOAD_BYTES,
     ) -> None:
         self.hass = hass
         self.audio_port = audio_port
         self.control_port = control_port
+        self.max_payload = max_payload
         self._audio_transport: Optional[asyncio.DatagramTransport] = None
         self._control_transport: Optional[asyncio.DatagramTransport] = None
         # remote_ip -> active consumer (token-protected).
@@ -125,9 +127,10 @@ class IntercomUdpSocketManager:
             return False
 
         _LOGGER.info(
-            "UdpSocketManager listening: audio=%d control=%d",
+            "UdpSocketManager listening: audio=%d control=%d max_payload=%d",
             self.audio_port,
             self.control_port,
+            self.max_payload,
         )
 
         return True
@@ -286,11 +289,11 @@ class IntercomUdpSocketManager:
     def send_audio(self, host: str, data: bytes) -> bool:
         if self._audio_transport is None:
             return False
-        if len(data) > UDP_SAFE_PAYLOAD_BYTES:
+        if len(data) > self.max_payload:
             _LOGGER.warning(
                 "UDP audio frame to %s is %d bytes, above safe payload %d; "
                 "dropping instead of relying on IP fragmentation",
-                host, len(data), UDP_SAFE_PAYLOAD_BYTES,
+                host, len(data), self.max_payload,
             )
             return False
         try:

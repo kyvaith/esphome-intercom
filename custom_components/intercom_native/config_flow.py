@@ -11,6 +11,7 @@ from .const import (
     INTERCOM_UDP_AUDIO_PORT,
     INTERCOM_UDP_CONTROL_PORT,
 )
+from .audio_format import UDP_SAFE_PAYLOAD_BYTES
 
 
 def _port_selector():
@@ -37,6 +38,7 @@ class IntercomNativeConfigFlow(ConfigFlow, domain=DOMAIN):
             "tcp_port": existing.get("tcp_port", INTERCOM_PORT),
             "udp_audio_port": existing.get("udp_audio_port", INTERCOM_UDP_AUDIO_PORT),
             "udp_control_port": existing.get("udp_control_port", INTERCOM_UDP_CONTROL_PORT),
+            "udp_max_payload": existing.get("udp_max_payload", UDP_SAFE_PAYLOAD_BYTES),
             "advertise_host": existing.get("advertise_host", ""),
         }
         schema = vol.Schema(
@@ -46,6 +48,9 @@ class IntercomNativeConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required("use_udp", default=defaults["use_udp"]): BooleanSelector(),
                 vol.Required("udp_audio_port", default=defaults["udp_audio_port"]): _port_selector(),
                 vol.Required("udp_control_port", default=defaults["udp_control_port"]): _port_selector(),
+                vol.Required("udp_max_payload", default=defaults["udp_max_payload"]): NumberSelector(
+                    NumberSelectorConfig(min=576, max=65507, step=1, mode="box")
+                ),
                 vol.Optional("advertise_host", default=defaults["advertise_host"]): str,
             }
         )
@@ -53,7 +58,7 @@ class IntercomNativeConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             # Number selectors hand floats; coerce to int once on the boundary.
-            for k in ("tcp_port", "udp_audio_port", "udp_control_port"):
+            for k in ("tcp_port", "udp_audio_port", "udp_control_port", "udp_max_payload"):
                 user_input[k] = int(user_input[k])
             user_input["advertise_host"] = (user_input.get("advertise_host") or "").strip()
 

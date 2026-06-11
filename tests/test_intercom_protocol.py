@@ -417,6 +417,14 @@ class IntercomProtocolFixturesTest(unittest.TestCase):
         self.assertFalse(unsafe.udp_safe)
         with self.assertRaises(ValueError):
             audio_format.require_udp_safe_formats([unsafe], context="test udp")
+        self.assertEqual(
+            audio_format.require_udp_safe_formats(
+                [unsafe],
+                context="test udp",
+                max_payload=unsafe.nominal_frame_bytes,
+            ),
+            [unsafe],
+        )
 
     def test_answer_v1_defaults_to_legacy_audio_format(self) -> None:
         parsed = protocol.parse_answer_body(protocol.build_call_id_only_body("A<->B"))
@@ -651,6 +659,28 @@ class IntercomSessionFsmTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ringing[0]["caller"], "Porta")
         self.assertTrue(await session.answer())
         self.assertIs(session.state, fsm.SessionState.STREAMING)
+
+    async def test_inbound_answer_uses_session_peer_formats(self) -> None:
+        fmt = audio_format.AudioFormat(48000, audio_format.PcmFormat.S32LE, 1, 20)
+        transport = FakeTransport()
+        session = websocket_api.IntercomSession(
+            hass=self.hass,
+            device_id="device-fsm",
+            host="192.0.2.10",
+            transport=transport,
+            audio_mode="full_duplex",
+            local_tx_formats=[fmt],
+            local_rx_formats=[fmt],
+            peer_tx_formats=[fmt],
+            peer_rx_formats=[fmt],
+        )
+
+        self.assertTrue(await session.start_ringing(caller_name="Porta"))
+        self.assertTrue(await session.answer())
+        self.assertEqual(session.tx_format, fmt)
+        self.assertEqual(session.rx_format, fmt)
+        self.assertEqual(transport.caller_to_dest_format, fmt)
+        self.assertEqual(transport.dest_to_caller_format, fmt)
 
     async def test_start_refused_after_terminal(self) -> None:
         session = self._session()

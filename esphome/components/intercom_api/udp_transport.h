@@ -21,8 +21,8 @@ namespace intercom_api {
 ///
 /// Audio socket (listen_port, default 6054): negotiated raw PCM, one
 /// frame per datagram, no header. Config validation rejects frame sizes
-/// above the safe UDP payload bound so lwIP/IP fragmentation is not part
-/// of the intercom contract.
+/// above udp_max_payload so IP fragmentation is an explicit opt-in, not
+/// an accidental part of the intercom contract.
 /// Control socket (control_port, default 6055): MessageHeader-framed
 /// signaling on a separate port so the audio path stays zero-copy and
 /// go2rtc interop isn't broken by header bytes.
@@ -43,7 +43,7 @@ class UdpTransport : public IntercomTransport {
 
   UdpTransport(uint16_t listen_port, std::string remote_ip, uint16_t remote_port,
                uint16_t control_port, uint16_t remote_control_port,
-               bool task_stacks_in_psram);
+               size_t max_payload, bool task_stacks_in_psram);
   ~UdpTransport() override;
 
   // IntercomTransport
@@ -77,6 +77,7 @@ class UdpTransport : public IntercomTransport {
 
   const uint16_t listen_port_;
   const uint16_t control_port_;
+  const size_t max_payload_;
   const bool task_stacks_in_psram_;
 
   // Atomics so ctrl_task can update on inbound MSG_START while tx_task

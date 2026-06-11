@@ -9,7 +9,7 @@
 #
 #   I2S RX 48kHz stereo (L=DAC ref, R=ADC mic) ─esp_ae_rate_cvt x3─> esp_aec @16k ──> mic_main ──> intercom TX
 #
-#   Intercom RX (16kHz) ──> intercom_speaker  (resampler 16→48) ─┐
+#   Intercom RX (48kHz) ──> intercom_speaker_mix ────────────────┐
 #   Ringtone   (FLAC)   ──> ringtone_speaker  (resampler 16→48) ─┴─> audio_mixer (48k) ──> hw_speaker ──> ES8311 DAC
 #
 # Single GPIO0 button (intercom-only, no VA mode):
@@ -263,7 +263,7 @@ microphone:
     esp_audio_stack_id: audio_stack
 
 # =============================================================================
-# Speakers (mixer topology: sources -> resampler -> mixer 48kHz -> hw_speaker)
+# Speakers (mixer topology: sources -> mixer 48kHz -> hw_speaker)
 # Mirrors the Spotpear full-build speaker stack so the intercom RX push-stream and the
 # ringtone announcement go through a buffered mixer instead of competing
 # directly on hw_speaker.
@@ -285,11 +285,6 @@ speaker:
       - id: ringtone_speaker_mix
         timeout: 10s
         buffer_duration: 100ms
-
-  - platform: resampler
-    id: intercom_speaker            # Intercom RX (16kHz) -> 48kHz
-    output_speaker: intercom_speaker_mix
-    buffer_duration: 128ms
 
   - platform: resampler
     id: ringtone_speaker             # Ringtone FLAC -> 48kHz
@@ -322,16 +317,23 @@ media_player:
         file: ${assets_base}assets/sounds/ringtone.flac
 
 # =============================================================================
-# Intercom API (TCP-based, port 6054). RX flows through intercom_speaker
-# resampler into the audio_mixer, so the speaker pipeline stays buffered
-# and tolerates TCP push-stream jitter.
+# Intercom API (TCP-based, port 6054). RX is negotiated at 48 kHz and writes
+# directly into the mixer source speaker, so the old 16->48 resampler is not in
+# the intercom hot path.
 # =============================================================================
 intercom_api:
   task_stacks_in_psram: true
   buffers_in_psram: true # Intercom staging buffers in PSRAM; AEC/AFE buffers live in esp_audio_stack
   id: intercom
+  audio:
+    # Mic TX is post-AEC and stays at 16 kHz; speaker RX accepts native 48 kHz.
+    rx:
+      sample_rate: 48000
+      pcm_format: s16le
+      channels: 1
+      frame_ms: 20
   microphone: mic_main
-  speaker: intercom_speaker
+  speaker: intercom_speaker_mix
   ringing_timeout: 30s
   delete_contact_missing_from:
     updates_number: 1

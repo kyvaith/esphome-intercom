@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
-from .audio_format import parse_audio_format_list, require_udp_safe_formats
+from .audio_format import UDP_SAFE_PAYLOAD_BYTES, parse_audio_format_list, require_udp_safe_formats
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -125,12 +125,6 @@ def parse_intercom_endpoint(value: str | None) -> dict | None:
     if parsed_tail is None:
         return None
     mode, tx_formats, rx_formats = parsed_tail
-    try:
-        require_udp_safe_formats(tx_formats, context=f"{name} UDP tx_formats")
-        require_udp_safe_formats(rx_formats, context=f"{name} UDP rx_formats")
-    except ValueError as err:
-        _LOGGER.warning("Invalid UDP intercom endpoint %r: %s", text, err)
-        return None
     return {
         "name": name,
         "transport": "udp",
@@ -251,6 +245,26 @@ class IntercomDeviceResolver:
                     device.name or esphome_id or device_id,
                 )
                 continue
+            if endpoint["transport"] == "udp":
+                max_payload = int(
+                    self.hass.data.get(DOMAIN, {})
+                    .get("transport_config", {})
+                    .get("udp_max_payload", UDP_SAFE_PAYLOAD_BYTES)
+                )
+                try:
+                    require_udp_safe_formats(
+                        endpoint["tx_formats"],
+                        context=f"{endpoint['name']} UDP tx_formats",
+                        max_payload=max_payload,
+                    )
+                    require_udp_safe_formats(
+                        endpoint["rx_formats"],
+                        context=f"{endpoint['name']} UDP rx_formats",
+                        max_payload=max_payload,
+                    )
+                except ValueError as err:
+                    _LOGGER.warning("Skipping UDP intercom device %s: %s", endpoint["name"], err)
+                    continue
 
             route_id = self.route_id_for_host(endpoint["host"])
             if not route_id:
@@ -265,6 +279,15 @@ class IntercomDeviceResolver:
                 "tcp_port": endpoint["tcp_port"],
                 "udp_audio_port": endpoint["udp_audio_port"],
                 "udp_control_port": endpoint["udp_control_port"],
+                "udp_max_payload": (
+                    int(
+                        self.hass.data.get(DOMAIN, {})
+                        .get("transport_config", {})
+                        .get("udp_max_payload", UDP_SAFE_PAYLOAD_BYTES)
+                    )
+                    if endpoint["transport"] == "udp"
+                    else UDP_SAFE_PAYLOAD_BYTES
+                ),
                 "audio_mode": endpoint["audio_mode"],
                 "tx_formats": _format_tokens(endpoint["tx_formats"]),
                 "rx_formats": _format_tokens(endpoint["rx_formats"]),

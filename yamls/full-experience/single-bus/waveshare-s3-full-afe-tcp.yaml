@@ -34,7 +34,7 @@
 #
 #   Music/radio → media_speaker (resampler) ───────────┐
 #   VA TTS      → tts_speaker (resampler) ─────────────┼── mixer (48kHz) → hw_speaker → ES8311 DAC
-#   Intercom RX → intercom_speaker (resampler) ────────┘
+#   Intercom RX → intercom_speaker_mix (48k) ──────────┘
 #
 # =============================================================================
 
@@ -341,8 +341,16 @@ voice_assistant:
 intercom_api:
   task_stacks_in_psram: true   # save ~28KB internal heap on S3 PSRAM builds by placing task stacks in PSRAM
   buffers_in_psram: true # Intercom staging buffers in PSRAM; AEC/AFE buffers live in esp_audio_stack
+  audio:
+    # Mic TX is the AFE output and therefore stays at esp-sr's 16 kHz surface.
+    # Speaker RX can accept HA/browser PCM at the native 48 kHz speaker bus rate.
+    rx:
+      sample_rate: 48000
+      pcm_format: s16le
+      channels: 1
+      frame_ms: 20
   microphone: mic_main
-  speaker: intercom_speaker
+  speaker: intercom_speaker_mix
   ringing_timeout: 30s
   # routing_mode default = device_independent (P2P). Override at runtime
   # via the "HA PBX Mode" switch in the device-specific switch block below.

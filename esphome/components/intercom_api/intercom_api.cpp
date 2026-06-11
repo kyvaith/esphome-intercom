@@ -142,7 +142,7 @@ bool IntercomApi::setup_transport_() {
     this->transport_ = std::make_unique<UdpTransport>(
         this->listen_port_, this->remote_ip_, this->remote_port_,
         this->control_port_, this->remote_control_port_,
-        this->task_stacks_in_psram_);
+        this->udp_max_payload_, this->task_stacks_in_psram_);
   } else
 #endif
 #ifdef USE_INTERCOM_TCP_TRANSPORT

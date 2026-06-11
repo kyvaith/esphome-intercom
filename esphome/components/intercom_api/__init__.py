@@ -90,6 +90,7 @@ CONF_QUERY_TIMEOUT = "query_timeout"
 CONF_MAX_RESULTS = "max_results"
 CONF_PROTOCOLS = "protocols"
 CONF_NETWORK_SOCKET_HEADROOM = "network_socket_headroom"
+CONF_UDP_MAX_PAYLOAD = "udp_max_payload"
 
 ROUTING_DEVICE_INDEPENDENT = "device_independent"
 ROUTING_HA_PBX = "ha_pbx"
@@ -277,6 +278,9 @@ CONFIG_SCHEMA = cv.Schema(
         # as Name|IP|audio_port|control_port; short Name|IP|audio_port
         # falls back to this local control_port.
         cv.Optional(CONF_CONTROL_PORT, default=6055): cv.port,
+        cv.Optional(CONF_UDP_MAX_PAYLOAD, default=UDP_SAFE_PAYLOAD_BYTES): cv.int_range(
+            min=576, max=65507
+        ),
         # TCP-only option (ignored for udp). Both server (accept inbound
         # calls from peers) and client (originate to dest's tcp_port) use
         # the same number.
@@ -469,14 +473,17 @@ def _final_validate(config):
                 "(audio and control travel on separate UDP sockets)."
             )
         audio_cfg = config[CONF_AUDIO]
+        max_payload = config[CONF_UDP_MAX_PAYLOAD]
         for direction in (CONF_TX, CONF_RX):
             fmt = audio_cfg[direction]
             frame_bytes = _format_frame_bytes(fmt)
-            if frame_bytes > UDP_SAFE_PAYLOAD_BYTES:
+            if frame_bytes > max_payload:
                 raise cv.Invalid(
                     f"intercom_api UDP audio.{direction} frame is {frame_bytes} bytes, "
-                    f"above the safe datagram payload limit of {UDP_SAFE_PAYLOAD_BYTES}. "
-                    "Use protocol: tcp or lower sample_rate/channels/pcm_format/frame_ms."
+                    f"above the configured UDP payload limit of {max_payload}. "
+                    "UDP audio sends one complete PCM frame per datagram and does not rely on IP "
+                    "fragmentation. Use protocol: tcp, lower sample_rate/channels/pcm_format/frame_ms, "
+                    "or raise udp_max_payload only on a LAN that intentionally supports larger datagrams."
                 )
 
     if CONF_MICROPHONE in config and CONF_MICROPHONE_SOURCE in config:
@@ -603,6 +610,7 @@ def _add_transport_settings(var, config):
         cg.add(var.set_remote_port(config[CONF_REMOTE_PORT]))
         cg.add(var.set_listen_port(config[CONF_LISTEN_PORT]))
         cg.add(var.set_control_port(config[CONF_CONTROL_PORT]))
+        cg.add(var.set_udp_max_payload(config[CONF_UDP_MAX_PAYLOAD]))
     else:
         cg.add(var.set_protocol(TransportType.TCP))
         cg.add(var.set_tcp_port(config[CONF_TCP_PORT]))

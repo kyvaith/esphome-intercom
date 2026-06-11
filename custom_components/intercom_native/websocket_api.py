@@ -20,6 +20,7 @@ from .audio_format import (
     HA_BROWSER_RX_FORMATS,
     HA_BROWSER_TX_FORMATS,
     LEGACY_AUDIO_FORMAT,
+    UDP_SAFE_PAYLOAD_BYTES,
     AudioFormat,
     choose_common_format,
     parse_audio_format_list,
@@ -226,6 +227,7 @@ def _device_formats(device: dict | None, key: str) -> list[AudioFormat]:
             require_udp_safe_formats(
                 formats,
                 context=f"{device.get('name') or device.get('device_id')} UDP {key}",
+                max_payload=int(device.get("udp_max_payload") or UDP_SAFE_PAYLOAD_BYTES),
             )
         return formats
     except ValueError as err:
@@ -537,16 +539,16 @@ class IntercomSession:
     def _negotiate_incoming_formats(self) -> bool:
         if self._transport is None:
             return False
-        caller_to_dest = choose_common_format(self._transport.peer_tx_formats, self.local_rx_formats)
-        dest_to_caller = choose_common_format(self._transport.peer_rx_formats, self.local_tx_formats)
+        caller_to_dest = choose_common_format(self.peer_tx_formats, self.local_rx_formats)
+        dest_to_caller = choose_common_format(self.peer_rx_formats, self.local_tx_formats)
         if caller_to_dest is None or dest_to_caller is None:
             _LOGGER.error(
                 "No compatible inbound audio format for %s: peer_tx=%s local_rx=%s local_tx=%s peer_rx=%s",
                 self.device_id,
-                [fmt.wire_token() for fmt in self._transport.peer_tx_formats],
+                [fmt.wire_token() for fmt in self.peer_tx_formats],
                 [fmt.wire_token() for fmt in self.local_rx_formats],
                 [fmt.wire_token() for fmt in self.local_tx_formats],
-                [fmt.wire_token() for fmt in self._transport.peer_rx_formats],
+                [fmt.wire_token() for fmt in self.peer_rx_formats],
             )
             return False
         self.rx_format = caller_to_dest

@@ -32,9 +32,10 @@ static void wake_udp_socket(int socket, uint16_t port) {
 UdpTransport::UdpTransport(uint16_t listen_port, std::string remote_ip,
                             uint16_t remote_port, uint16_t control_port,
                             uint16_t remote_control_port,
-                            bool task_stacks_in_psram)
+                            size_t max_payload, bool task_stacks_in_psram)
     : listen_port_(listen_port),
       control_port_(control_port),
+      max_payload_(max_payload),
       task_stacks_in_psram_(task_stacks_in_psram) {
   this->remote_port_.store(remote_port, std::memory_order_release);
   this->remote_control_port_.store(
@@ -311,9 +312,9 @@ bool UdpTransport::send_decline_to_(const struct sockaddr_in &dst,
 
 void UdpTransport::send_audio_frame(const uint8_t *pcm, size_t bytes) {
   if (!this->active_.load(std::memory_order_acquire) || this->audio_socket_ < 0) return;
-  if (bytes > UDP_SAFE_AUDIO_PAYLOAD_BYTES) {
+  if (bytes > this->max_payload_) {
     LOG_W_THROTTLED("UDP audio frame too large for safe datagram payload: %u > %u bytes; dropping",
-                    (unsigned) bytes, (unsigned) UDP_SAFE_AUDIO_PAYLOAD_BYTES);
+                    (unsigned) bytes, (unsigned) this->max_payload_);
     return;
   }
 

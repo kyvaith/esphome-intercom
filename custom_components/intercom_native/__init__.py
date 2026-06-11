@@ -37,6 +37,7 @@ from .audio_format import (
     HA_BROWSER_RX_FORMATS,
     HA_BROWSER_TX_FORMATS,
     LEGACY_AUDIO_FORMAT,
+    UDP_SAFE_PAYLOAD_BYTES,
     parse_audio_format_list,
     require_udp_safe_formats,
 )
@@ -97,6 +98,7 @@ def _device_formats(device: dict | None, key: str):
             require_udp_safe_formats(
                 formats,
                 context=f"{device.get('name') or device.get('device_id')} UDP {key}",
+                max_payload=int(device.get("udp_max_payload") or UDP_SAFE_PAYLOAD_BYTES),
             )
         return formats
     except ValueError as err:
@@ -128,6 +130,7 @@ def _entry_transport_config(entry: ConfigEntry | None = None) -> dict:
         "tcp_port": int(data.get("tcp_port", INTERCOM_PORT)),
         "udp_audio_port": int(data.get("udp_audio_port", INTERCOM_UDP_AUDIO_PORT)),
         "udp_control_port": int(data.get("udp_control_port", INTERCOM_UDP_CONTROL_PORT)),
+        "udp_max_payload": int(data.get("udp_max_payload", UDP_SAFE_PAYLOAD_BYTES)),
         "advertise_host": (data.get("advertise_host") or "").strip(),
     }
 
@@ -142,6 +145,7 @@ def _get_transport_config(hass: HomeAssistant) -> dict:
             "tcp_port": INTERCOM_PORT,
             "udp_audio_port": INTERCOM_UDP_AUDIO_PORT,
             "udp_control_port": INTERCOM_UDP_CONTROL_PORT,
+            "udp_max_payload": UDP_SAFE_PAYLOAD_BYTES,
             "advertise_host": "",
         },
     )
@@ -1035,6 +1039,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         "tcp_port": INTERCOM_PORT,
         "udp_audio_port": INTERCOM_UDP_AUDIO_PORT,
         "udp_control_port": INTERCOM_UDP_CONTROL_PORT,
+        "udp_max_payload": UDP_SAFE_PAYLOAD_BYTES,
     }
     hass.data[DOMAIN]["tcp_port"] = INTERCOM_PORT
     await _async_setup_shared(hass, config)
@@ -1099,6 +1104,7 @@ async def _async_start_udp_socket_manager(hass: HomeAssistant) -> bool:
         hass,
         audio_port=cfg["udp_audio_port"],
         control_port=cfg["udp_control_port"],
+        max_payload=cfg["udp_max_payload"],
     )
     if not await manager.start():
         _LOGGER.error("Failed to start UdpSocketManager; UDP path disabled")
@@ -1132,10 +1138,12 @@ async def _async_start_udp_socket_manager(hass: HomeAssistant) -> bool:
             require_udp_safe_formats(
                 caller_tx_formats or [LEGACY_AUDIO_FORMAT],
                 context=f"UDP caller {caller_name or host} tx_formats",
+                max_payload=cfg["udp_max_payload"],
             )
             require_udp_safe_formats(
                 caller_rx_formats or [LEGACY_AUDIO_FORMAT],
                 context=f"UDP caller {caller_name or host} rx_formats",
+                max_payload=cfg["udp_max_payload"],
             )
         except ValueError as err:
             _LOGGER.warning("Rejecting UDP START from %s: %s", host, err)
