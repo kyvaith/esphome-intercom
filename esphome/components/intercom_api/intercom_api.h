@@ -30,9 +30,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
-#ifdef USE_INTERCOM_MDNS_ANNOUNCE
 #include <esp_event.h>
-#endif
 
 #include <atomic>
 #include <memory>
@@ -418,15 +416,14 @@ class IntercomApi : public Component {
   void publish_contacts_();
   void publish_transport_();
   void publish_endpoint_();
-#ifdef USE_INTERCOM_MDNS_ANNOUNCE
-  void publish_mdns_endpoint_(const std::string &endpoint);
   void request_endpoint_publish_();
   static void ip_event_handler_(void *arg, esp_event_base_t event_base,
                                 int32_t event_id, void *event_data);
+#ifdef USE_INTERCOM_MDNS_ANNOUNCE
+  void publish_mdns_endpoint_(const std::string &endpoint);
   bool ensure_mdns_announce_registered_(const std::string &endpoint);
 #else
   void publish_mdns_endpoint_(const std::string &) {}
-  void request_endpoint_publish_() {}
 #endif
   std::string local_ip_string_() const;
   std::string build_endpoint_string_() const;
@@ -488,12 +485,12 @@ class IntercomApi : public Component {
   text_sensor::TextSensor *last_reason_sensor_{nullptr};  // terminal reason for HA/card mirroring
   std::string last_reason_;
   std::string last_endpoint_;
+  std::atomic<bool> endpoint_publish_requested_{false};
 #ifdef USE_INTERCOM_MDNS_ANNOUNCE
   std::string last_mdns_endpoint_;
   bool mdns_endpoint_warning_logged_{false};
   bool mdns_announce_enabled_{false};
   bool mdns_announce_registered_{false};
-  std::atomic<bool> endpoint_publish_requested_{false};
 #else
   bool mdns_announce_enabled_{false};
 #endif

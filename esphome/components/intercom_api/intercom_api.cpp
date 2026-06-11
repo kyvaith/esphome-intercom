@@ -3,8 +3,10 @@
 #ifdef USE_ESP32
 
 #include <algorithm>
+#include <cstring>
 
 #include "esphome/core/application.h"
+#include "esphome/components/network/util.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
@@ -17,9 +19,9 @@
 #include "udp_transport.h"
 #endif
 
+#include "esp_event.h"
 #include "esp_netif.h"
 #ifdef USE_INTERCOM_MDNS_ANNOUNCE
-#include "esp_event.h"
 #include "mdns.h"
 #endif
 
@@ -274,13 +276,9 @@ void IntercomApi::setup() {
   }
 
   this->load_settings_();
-#ifdef USE_INTERCOM_MDNS_ANNOUNCE
-  if (this->mdns_announce_enabled_) {
-    esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID,
-                                        &IntercomApi::ip_event_handler_,
-                                        this, nullptr);
-  }
-#endif
+  esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID,
+                                      &IntercomApi::ip_event_handler_,
+                                      this, nullptr);
 #ifdef USE_INTERCOM_MDNS_DISCOVERY
   this->start_mdns_discovery_();
 #endif
@@ -363,11 +361,9 @@ void IntercomApi::handle_udp_keepalive_(uint32_t now_ms) {
 }
 
 void IntercomApi::loop() {
-#ifdef USE_INTERCOM_MDNS_ANNOUNCE
   if (this->endpoint_publish_requested_.exchange(false, std::memory_order_acq_rel)) {
     this->publish_endpoint_();
   }
-#endif
 #ifdef USE_INTERCOM_MDNS_DISCOVERY
   this->process_pending_mdns_discovery_();
 #endif
@@ -394,9 +390,7 @@ void IntercomApi::loop() {
 
   bool keep_loop = this->cycle_active_ ||
                    this->call_state_.load(std::memory_order_acquire) != CallState::IDLE;
-#ifdef USE_INTERCOM_MDNS_ANNOUNCE
   keep_loop = keep_loop || this->endpoint_publish_requested_.load(std::memory_order_acquire);
-#endif
 #ifdef USE_INTERCOM_MDNS_DISCOVERY
   keep_loop = keep_loop || this->mdns_discovery_pending_.load(std::memory_order_acquire);
 #endif
@@ -497,17 +491,15 @@ void IntercomApi::publish_transport_() {
 }
 
 std::string IntercomApi::local_ip_string_() const {
-  esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-  if (sta_netif == nullptr) {
-    return "";
+  char ip[network::IP_ADDRESS_BUFFER_SIZE];
+  for (auto &address : network::get_ip_addresses()) {
+    if (!address.is_ip4()) continue;
+    address.str_to(ip);
+    if (strcmp(ip, "0.0.0.0") != 0) {
+      return ip;
+    }
   }
-  esp_netif_ip_info_t ip_info{};
-  if (esp_netif_get_ip_info(sta_netif, &ip_info) != ESP_OK || ip_info.ip.addr == 0) {
-    return "";
-  }
-  char ip[16];
-  snprintf(ip, sizeof(ip), IPSTR, IP2STR(&ip_info.ip));
-  return ip;
+  return "";
 }
 
 std::string IntercomApi::build_endpoint_string_() const {
@@ -560,6 +552,10 @@ std::string IntercomApi::build_endpoint_string_() const {
 
 void IntercomApi::publish_endpoint_() {
   std::string endpoint = this->build_endpoint_string_();
+  if (endpoint.empty()) {
+    ESP_LOGW(TAG, "Intercom endpoint waiting for IPv4 address from ESPHome network");
+    return;
+  }
   if (this->endpoint_sensor_ != nullptr && endpoint != this->last_endpoint_) {
     this->last_endpoint_ = endpoint;
     this->endpoint_sensor_->publish_state(endpoint);
@@ -567,7 +563,6 @@ void IntercomApi::publish_endpoint_() {
   this->publish_mdns_endpoint_(endpoint);
 }
 
-#ifdef USE_INTERCOM_MDNS_ANNOUNCE
 void IntercomApi::request_endpoint_publish_() {
   this->endpoint_publish_requested_.store(true, std::memory_order_release);
   this->enable_loop_soon_any_context();
@@ -580,6 +575,7 @@ void IntercomApi::ip_event_handler_(void *arg, esp_event_base_t event_base,
   static_cast<IntercomApi *>(arg)->request_endpoint_publish_();
 }
 
+#ifdef USE_INTERCOM_MDNS_ANNOUNCE
 bool IntercomApi::ensure_mdns_announce_registered_(const std::string &endpoint) {
   if (this->mdns_announce_registered_) return true;
 
