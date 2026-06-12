@@ -1397,8 +1397,10 @@ size_t ESPAudioStack::play(const uint8_t *data, size_t len, TickType_t ticks_to_
     return 0;
   }
 
-  // Data arrives at bus rate (e.g. 48kHz from mixer/resampler). Write directly.
-  size_t written = this->speaker_buffer_->write_without_replacement((void *) data, len, ticks_to_wait, true);
+  // Data arrives at bus rate (e.g. 48kHz from mixer/resampler). Keep writes
+  // all-or-nothing: ESPHome's AudioSinkTransferBuffer retains unwritten bytes
+  // and retries, while partial sink writes create audible PCM discontinuities.
+  size_t written = this->speaker_buffer_->write_without_replacement((void *) data, len, ticks_to_wait, false);
 
   if (written > 0) {
     this->last_speaker_audio_ms_.store(millis(), std::memory_order_relaxed);
