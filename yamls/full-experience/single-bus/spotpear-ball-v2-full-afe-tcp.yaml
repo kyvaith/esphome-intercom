@@ -31,9 +31,9 @@ substitutions:
   mic_id: mic_afe
   afe_vad_restore_mode: ALWAYS_ON
 
-  ext_components_source: "github://n-IA-hane/esphome-intercom@dev"
+  ext_components_source: "github://n-IA-hane/esphome-intercom@sendspin-tests"
 
-  assets_base: "https://github.com/n-IA-hane/esphome-intercom/raw/dev/"
+  assets_base: "https://github.com/n-IA-hane/esphome-intercom/raw/sendspin-tests/"
 
   # AI avatar folder (${assets_base}assets/images/assistant/<ai_avatar>/)
   ai_avatar: default
@@ -78,24 +78,24 @@ substitutions:
   display_height: "240"
 
 packages:
-  core: github://n-IA-hane/esphome-intercom/packages/va_intercom.yaml@dev
-  ota_maintenance: github://n-IA-hane/esphome-intercom/packages/ota/full_audio_lvgl_maintenance.yaml@dev
-  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@dev
-  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@dev
-  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@dev
-  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@dev
-  status_led: github://n-IA-hane/esphome-intercom/packages/led/status_spotpear_ball_v2.yaml@dev
-  afe_entities: github://n-IA-hane/esphome-intercom/packages/esp_afe/single_mic_entities.yaml@dev
-  audio_stack_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/controls.yaml@dev
-  speaker_power: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/speaker_power_output.yaml@dev
-  speaker_mixer: github://n-IA-hane/esphome-intercom/packages/audio/full_mono_mixer_48k.yaml@dev
-  flac_codecs_psram: github://n-IA-hane/esphome-intercom/packages/audio/flac_codecs_psram.yaml@dev
-  lvgl_settings_nav: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_navigation.yaml@dev
-  lvgl_settings_sync_volumes: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_sync_volumes.yaml@dev
-  lvgl_settings_sync_mute: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_sync_mute.yaml@dev
-  lvgl_settings_sync_aec: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_sync_aec.yaml@dev
-  lvgl_settings_sync_va: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_sync_va.yaml@dev
-  spotpear_intercom_nav: github://n-IA-hane/esphome-intercom/packages/lvgl/spotpear_intercom/nav_full.yaml@dev
+  core: github://n-IA-hane/esphome-intercom/packages/va_intercom.yaml@sendspin-tests
+  ota_maintenance: github://n-IA-hane/esphome-intercom/packages/ota/full_audio_lvgl_maintenance.yaml@sendspin-tests
+  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@sendspin-tests
+  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@sendspin-tests
+  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@sendspin-tests
+  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@sendspin-tests
+  status_led: github://n-IA-hane/esphome-intercom/packages/led/status_spotpear_ball_v2.yaml@sendspin-tests
+  afe_entities: github://n-IA-hane/esphome-intercom/packages/esp_afe/single_mic_entities.yaml@sendspin-tests
+  audio_stack_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/controls.yaml@sendspin-tests
+  speaker_power: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/speaker_power_output.yaml@sendspin-tests
+  speaker_mixer: github://n-IA-hane/esphome-intercom/packages/audio/full_mono_mixer_48k.yaml@sendspin-tests
+  flac_codecs_psram: github://n-IA-hane/esphome-intercom/packages/audio/flac_codecs_psram.yaml@sendspin-tests
+  lvgl_settings_nav: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_navigation.yaml@sendspin-tests
+  lvgl_settings_sync_volumes: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_sync_volumes.yaml@sendspin-tests
+  lvgl_settings_sync_mute: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_sync_mute.yaml@sendspin-tests
+  lvgl_settings_sync_aec: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_sync_aec.yaml@sendspin-tests
+  lvgl_settings_sync_va: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_sync_va.yaml@sendspin-tests
+  spotpear_intercom_nav: github://n-IA-hane/esphome-intercom/packages/lvgl/spotpear_intercom/nav_full.yaml@sendspin-tests
 
 # =============================================================================
 # ESP32 BASE CONFIGURATION
@@ -326,35 +326,60 @@ speaker:
     sample_rate: 48000
 
 # =============================================================================
-# MEDIA PLAYER (separate pipelines: media vs TTS announcement)
+# MEDIA PLAYER (single source-orchestrating player: media vs TTS announcement)
 # =============================================================================
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: true
+
+audio_file:
+  - id: timer_finished_sound
+    file: ${assets_base}assets/sounds/timer_finished.flac
+  - id: intercom_ringing_sound
+    file: ${assets_base}assets/sounds/ringtone.flac
+
+media_source:
+  - platform: audio_http
+    id: media_http_source
+    buffer_size: 131072
+    task_stack_in_psram: true
+  - platform: audio_http
+    id: announcement_http_source
+    buffer_size: 65536
+    task_stack_in_psram: true
+  - platform: audio_file
+    id: announcement_file_source
+    task_stack_in_psram: true
+  - platform: sendspin
+    id: sendspin_media_source
+    sample_rate: 48000
+    buffer_size: 524288
+    task_stack_in_psram: true
+    decode_memory: psram
+
 media_player:
-  - platform: speaker
+  - platform: speaker_source
     name: None
     id: speaker_media_player
     internal: false
-    task_stack_in_psram: true
-    # ESPHome media_player volume and board `master_volume` are cascaded by
-    # esp_audio_stack instead of sharing the same speaker volume slot.
     volume_initial: 100%
     volume_min: 0%
     volume_max: 100%
     volume_increment: 5%
-    buffer_size: 262144   # 256KB per pipeline (default 1MB is oversized under full load)
-    pause_releases_pipeline: true
     media_pipeline:
       speaker: media_speaker
       sample_rate: 48000
       format: FLAC
+      sources:
+        - media_http_source
+        - sendspin_media_source
     announcement_pipeline:
       speaker: tts_speaker
       format: FLAC
       sample_rate: 48000
-    files:
-      - id: timer_finished_sound
-        file: ${assets_base}assets/sounds/timer_finished.flac
-      - id: intercom_ringing_sound
-        file: ${assets_base}assets/sounds/ringtone.flac
+      sources:
+        - announcement_http_source
+        - announcement_file_source
     on_announcement:
       - script.execute: update_status
       # Only show LED for announcements when intercom is idle
@@ -1086,6 +1111,7 @@ script:
               - switch.is_off: mute
               - not:
                   media_player.is_announcing:
+                    id: speaker_media_player
           then:
             - if:
                 condition:
@@ -1180,6 +1206,7 @@ script:
             - if:
                 condition:
                   media_player.is_playing:
+                    id: speaker_media_player
                 then:
                   # Music playing: show neutral mood screen instead of idle animation
                   - lambda: |-
@@ -1357,8 +1384,9 @@ script:
           condition:
             switch.is_on: timer_ringing
           then:
-            - media_player.speaker.play_on_device_media_file:
-                media_file: timer_finished_sound
+            - media_player.play_media:
+                id: speaker_media_player
+                media_url: "audio-file://timer_finished_sound"
                 announcement: true
             - delay: 6s
 
@@ -1665,10 +1693,12 @@ switch:
           id: voice_assistant_phase
           value: '${voice_assist_idle_phase_id}'
       - media_player.stop:
+          id: speaker_media_player
           announcement: true
       - script.execute: update_status
     on_turn_on:
       - media_player.stop:
+          id: speaker_media_player
           announcement: true
       - script.execute: timer_alarm_loop
       - script.execute: update_status
