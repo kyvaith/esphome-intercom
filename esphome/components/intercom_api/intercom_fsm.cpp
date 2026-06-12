@@ -12,6 +12,24 @@ namespace intercom_api {
 
 static const char *const TAG = "intercom_api.fsm";
 
+static uint8_t audio_stream_bits_per_sample(const AudioFormat &format) {
+  switch (format.pcm_format) {
+    case PcmFormat::S16LE:
+      return 16;
+    case PcmFormat::S24LE:
+      return 24;
+    case PcmFormat::S24LE_IN_S32:
+    case PcmFormat::S32LE:
+      return 32;
+    default:
+      return 16;
+  }
+}
+
+static audio::AudioStreamInfo audio_stream_info_from_format(const AudioFormat &format) {
+  return audio::AudioStreamInfo(audio_stream_bits_per_sample(format), format.channels, format.sample_rate);
+}
+
 // === Call-identity helpers ===
 // Mutex-guarded so the recv task and the main loop never observe a
 // half-written std::string assignment to the per-call fields.
@@ -481,6 +499,7 @@ void IntercomApi::set_active_(bool on) {
 #endif
 #ifdef USE_INTERCOM_API_SPEAKER
     if (this->speaker_) {
+      this->speaker_->set_audio_stream_info(audio_stream_info_from_format(this->rx_audio_format_));
       this->speaker_->start();
     }
 #endif
