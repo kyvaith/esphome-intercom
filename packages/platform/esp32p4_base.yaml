@@ -24,8 +24,10 @@ esp32:
   framework:
     type: esp-idf
     advanced:
-      compiler_optimization: PERF
       enable_idf_experimental_features: true
+      # Default ESPHome `-Os` (SIZE). P4 AFE/FFT workloads are sensitive to
+      # instruction-cache pressure; larger `-O2` binaries can starve loopTask
+      # under full audio load.
     sdkconfig_options:
       # Keep P4 instruction/rodata fetches in PSRAM as in the last stable
       # display/audio baseline. Disabling this globally fixed one AFE FFT crash

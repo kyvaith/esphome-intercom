@@ -136,7 +136,6 @@ micro_wake_word:
           - script.execute: barge_failsafe
           - voice_assistant.stop:
           - media_player.stop:
-              id: speaker_media_player
               announcement: true
         else:
           - logger.log:

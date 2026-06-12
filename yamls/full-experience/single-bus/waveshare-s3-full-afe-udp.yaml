@@ -44,9 +44,9 @@ substitutions:
   name: waveshare-s3
   friendly_name: Waveshare S3 Audio
 
-  ext_components_source: "github://n-IA-hane/esphome-intercom@sendspin-tests"
+  ext_components_source: "github://n-IA-hane/esphome-intercom@dev"
 
-  assets_base: "https://github.com/n-IA-hane/esphome-intercom/raw/sendspin-tests/"
+  assets_base: "https://github.com/n-IA-hane/esphome-intercom/raw/dev/"
 
   # Microphone ID for package mute switch
   mic_id: mic_main
@@ -56,21 +56,21 @@ substitutions:
 # Package: shared VA + Intercom state machine, callbacks, switches, buttons
 # =============================================================================
 packages:
-  core: github://n-IA-hane/esphome-intercom/packages/va_intercom.yaml@sendspin-tests
-  ota_maintenance: github://n-IA-hane/esphome-intercom/packages/ota/full_audio_maintenance.yaml@sendspin-tests
-  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_udp.yaml@sendspin-tests
-  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@sendspin-tests
-  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@sendspin-tests
-  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@sendspin-tests
-  status_led: github://n-IA-hane/esphome-intercom/packages/led/status_ws2812_ring.yaml@sendspin-tests
-  led_state_full: github://n-IA-hane/esphome-intercom/packages/led/state_full_ring.yaml@sendspin-tests
-  afe_entities: github://n-IA-hane/esphome-intercom/packages/esp_afe/dual_mic_entities.yaml@sendspin-tests
-  audio_stack_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/controls.yaml@sendspin-tests
-  speaker_power: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/speaker_power_switch.yaml@sendspin-tests
-  speaker_mixer: github://n-IA-hane/esphome-intercom/packages/audio/full_mono_mixer_48k.yaml@sendspin-tests
-  speaker_media_player: github://n-IA-hane/esphome-intercom/packages/media_player/full_mono_48k.yaml@sendspin-tests
-  va_timers: github://n-IA-hane/esphome-intercom/packages/voice_assistant/timers.yaml@sendspin-tests
-  flac_codecs_psram: github://n-IA-hane/esphome-intercom/packages/audio/flac_codecs_psram.yaml@sendspin-tests
+  core: github://n-IA-hane/esphome-intercom/packages/va_intercom.yaml@dev
+  ota_maintenance: github://n-IA-hane/esphome-intercom/packages/ota/full_audio_maintenance.yaml@dev
+  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_udp.yaml@dev
+  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@dev
+  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@dev
+  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@dev
+  status_led: github://n-IA-hane/esphome-intercom/packages/led/status_ws2812_ring.yaml@dev
+  led_state_full: github://n-IA-hane/esphome-intercom/packages/led/state_full_ring.yaml@dev
+  afe_entities: github://n-IA-hane/esphome-intercom/packages/esp_afe/dual_mic_entities.yaml@dev
+  audio_stack_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/controls.yaml@dev
+  speaker_power: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/speaker_power_switch.yaml@dev
+  speaker_mixer: github://n-IA-hane/esphome-intercom/packages/audio/full_mono_mixer_48k.yaml@dev
+  speaker_media_player: github://n-IA-hane/esphome-intercom/packages/media_player/full_mono_48k.yaml@dev
+  va_timers: github://n-IA-hane/esphome-intercom/packages/voice_assistant/timers.yaml@dev
+  flac_codecs_psram: github://n-IA-hane/esphome-intercom/packages/audio/flac_codecs_psram.yaml@dev
 
 # =============================================================================
 # ESPHome Base
@@ -291,6 +291,13 @@ speaker:
     esp_audio_stack_id: audio_stack
     sample_rate: 48000
 
+
+# =============================================================================
+# Media Player board sizing
+# =============================================================================
+media_player:
+  - id: !extend speaker_media_player
+    buffer_size: 131072
 
 # =============================================================================
 # Micro Wake Word: Hardware config (callbacks from package)

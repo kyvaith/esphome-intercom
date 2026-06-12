@@ -15,15 +15,15 @@
 substitutions:
   name: ha-voice-pe-intercom
   friendly_name: Home Assistant Voice PE Intercom
-  ext_components_source: "github://n-IA-hane/esphome-intercom@sendspin-tests"
+  ext_components_source: "github://n-IA-hane/esphome-intercom@dev"
   intercom_tcp_port: "6054"
 
 packages:
-  voice_pe_base: github://n-IA-hane/esphome-intercom/home-assistant-voice.yaml@sendspin-tests
-  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@sendspin-tests
-  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@sendspin-tests
-  intercom_settings: github://n-IA-hane/esphome-intercom/packages/intercom/call_settings.yaml@sendspin-tests
-  intercom_ha_api: github://n-IA-hane/esphome-intercom/packages/intercom/ha_api.yaml@sendspin-tests
+  voice_pe_base: github://n-IA-hane/esphome-intercom/home-assistant-voice.yaml@dev
+  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@dev
+  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@dev
+  intercom_settings: github://n-IA-hane/esphome-intercom/packages/intercom/call_settings.yaml@dev
+  intercom_ha_api: github://n-IA-hane/esphome-intercom/packages/intercom/ha_api.yaml@dev
 
 esphome:
   name: ${name}
