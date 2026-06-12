@@ -792,6 +792,12 @@ class IntercomCard extends HTMLElement {
     return this._isHaName(this._getDestination());
   }
 
+  _isHybridEspIncomingState(state) {
+    if (this._isHaSoftphoneMode()) return false;
+    const s = String(state || "").toLowerCase();
+    return s === "ringing" || s === "incoming";
+  }
+
   _usesEspReasonForTerminalDisplay() {
     return !this._isSoftphoneContext();
   }
@@ -1576,6 +1582,8 @@ class IntercomCard extends HTMLElement {
           ...(deviceInfo || {}),
           device_id: sessionDeviceId,
           audio_mode: peer?.audio_mode || "full_duplex",
+          tx_formats: peer?.tx_formats,
+          rx_formats: peer?.rx_formats,
           softphone: true,
         };
         this._activeDeviceInfo = sessionInfo;
@@ -1590,6 +1598,11 @@ class IntercomCard extends HTMLElement {
         // ESP is calling us - answer with proper ANSWER message (not START)
         this._callMode = "softphone";
         await this._answerEspCall(deviceInfo);
+      } else if (this._isHybridEspIncomingState(espState)) {
+        // Hybrid card answering an ESP-side incoming call: press the ESP's
+        // real smart Call button, even when the peer is the HA softphone.
+        this._callMode = "mirror";
+        await this._pressEspButton(this._callButtonEntityId, "Call");
       } else if (!softphone) {
         // Mirror mode: use the ESP's real smart Call button (ringing -> answer).
         this._callMode = "mirror";
@@ -1628,7 +1641,9 @@ class IntercomCard extends HTMLElement {
     this._render();
 
     try {
-      if (this._isSoftphoneContext()) {
+      if (this._isHybridEspIncomingState(this._getEspState())) {
+        await this._pressEspButton(this._declineButtonEntityId, "Decline");
+      } else if (this._isSoftphoneContext()) {
         await this._hass.connection.sendMessagePromise({
           type: "intercom_native/decline",
           device_id: this._sessionDeviceId(),

@@ -407,7 +407,11 @@ class IntercomSession:
                         return
                     continue
                 missing_ws_since = None
-                if _has_speaker(self.audio_mode) and time.monotonic() - self._last_browser_audio > WS_AUDIO_IDLE_TIMEOUT:
+                if (
+                    self._state is SessionState.STREAMING
+                    and _has_speaker(self.audio_mode)
+                    and time.monotonic() - self._last_browser_audio > WS_AUDIO_IDLE_TIMEOUT
+                ):
                     await _stop_device_sessions(self.device_id, hass=self.hass)
                     return
         except asyncio.CancelledError:

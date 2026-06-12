@@ -1611,13 +1611,7 @@ void ESPAudioStack::process_tx_path_(AudioTaskCtx &ctx) {
     return;
 
   if (ctx.speaker_running && !ctx.speaker_paused) {
-    // Do not play zero-padded partial speaker frames. The ring has one
-    // consumer, so once available() reports a full frame the following read
-    // cannot be shortened by another reader; producers can only add data.
-    ctx.speaker_got = 0;
-    if (this->speaker_buffer_->available() >= ctx.speaker_frame_bytes) {
-      ctx.speaker_got = this->speaker_buffer_->read((void *) ctx.spk_buffer, ctx.speaker_frame_bytes, 0);
-    }
+    ctx.speaker_got = this->speaker_buffer_->read((void *) ctx.spk_buffer, ctx.speaker_frame_bytes, 0);
     size_t got = ctx.speaker_got;
     // Treat partial frames as underrun too (the frame is padded with zero below
     // and must not be used as AEC reference, otherwise the AEC adaptive filter
@@ -1634,6 +1628,9 @@ void ESPAudioStack::process_tx_path_(AudioTaskCtx &ctx) {
         const size_t got_samples = got / sizeof(int16_t);
         esp_audio_libs::gain::apply(spk_bytes, spk_bytes, ctx.hot_output_volume_q31, got_samples,
                                     sizeof(int16_t));
+      }
+      if (got < ctx.speaker_frame_bytes) {
+        memset(((uint8_t *) ctx.spk_buffer) + got, 0, ctx.speaker_frame_bytes - got);
       }
 #ifdef USE_ESP_AUDIO_STACK_TDM_REF_DIAGNOSTIC
       ctx.current_speaker_dbfs = compute_rms_dbfs_i16(ctx.spk_buffer, ctx.bus_frame_size, 1);

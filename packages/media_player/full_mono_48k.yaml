@@ -33,6 +33,8 @@ media_source:
     id: sendspin_media_source
     sample_rate: 48000
     buffer_size: 524288
+    initial_static_delay: 180ms
+    static_delay_adjustable: true
     task_stack_in_psram: true
     decode_memory: psram
 

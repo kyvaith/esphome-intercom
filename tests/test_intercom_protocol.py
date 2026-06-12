@@ -513,7 +513,7 @@ class IntercomWebSocketSessionTest(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
         await asyncio.gather(*self.hass.tasks, return_exceptions=True)
 
-    async def _started_session(self, device_id="device-a", transport=None):
+    async def _started_session(self, device_id="device-a", transport=None, expected="streaming"):
         transport = transport or FakeTransport()
         session = websocket_api.IntercomSession(
             hass=self.hass,
@@ -522,7 +522,7 @@ class IntercomWebSocketSessionTest(unittest.IsolatedAsyncioTestCase):
             transport=transport,
             audio_mode="full_duplex",
         )
-        self.assertEqual(await session.start(), "streaming")
+        self.assertEqual(await session.start(), expected)
         websocket_api._sessions[device_id] = session
         return session, transport
 
@@ -562,6 +562,27 @@ class IntercomWebSocketSessionTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(transport.stop_count, 1)
             self.assertEqual(transport.disconnect_count, 1)
             self.assertTrue(ws.closed)
+        finally:
+            websocket_api.WS_AUDIO_WATCHDOG_INTERVAL = old_interval
+            websocket_api.WS_AUDIO_IDLE_TIMEOUT = old_timeout
+
+    async def test_audio_ws_watchdog_does_not_hang_up_outgoing_ringing(self) -> None:
+        old_interval = websocket_api.WS_AUDIO_WATCHDOG_INTERVAL
+        old_timeout = websocket_api.WS_AUDIO_IDLE_TIMEOUT
+        websocket_api.WS_AUDIO_WATCHDOG_INTERVAL = 0.01
+        websocket_api.WS_AUDIO_IDLE_TIMEOUT = 0.02
+        try:
+            transport = FakeTransport(result="ringing")
+            session, _ = await self._started_session("device-a", transport, expected="ringing")
+            ws = FakeWebSocket()
+            session.bind_audio_ws(ws)
+
+            await asyncio.sleep(0.08)
+
+            self.assertIs(websocket_api._sessions.get("device-a"), session)
+            self.assertEqual(transport.stop_count, 0)
+            self.assertEqual(transport.disconnect_count, 0)
+            self.assertFalse(ws.closed)
         finally:
             websocket_api.WS_AUDIO_WATCHDOG_INTERVAL = old_interval
             websocket_api.WS_AUDIO_IDLE_TIMEOUT = old_timeout
