@@ -79,6 +79,8 @@ class IntercomCard extends HTMLElement {
     // Auto-answer
     this._autoAnswer = false;
     this._autoAnswering = false;  // Prevents re-entry during auto-answer
+    this._ringtoneEnabled = false;
+    this._ringtoneRequestKey = `intercom-card-${Math.random().toString(36).slice(2)}`;
     this._deepLinkAnswerConsumed = false;
 
     // Remote-end progress / ended-call surface comes from the unified HA
@@ -117,6 +119,7 @@ class IntercomCard extends HTMLElement {
       this._availableDevicesRetryTimer = null;
     }
     intercomEngine.removeEventListener("state", this._engineListener);
+    intercomEngine.clearRingtoneRequest(this._ringtoneRequestKey);
   }
 
   async _subscribeBusEvents() {
@@ -428,6 +431,7 @@ class IntercomCard extends HTMLElement {
     const deviceId = this._autoAnswerStorageId();
     if (deviceId) {
       this._autoAnswer = localStorage.getItem(`intercom_auto_answer_${deviceId}`) === "true";
+      this._ringtoneEnabled = localStorage.getItem(`intercom_ringtone_${deviceId}`) === "true";
     }
     this._render();
   }
@@ -606,6 +610,21 @@ class IntercomCard extends HTMLElement {
     return this._isHaSoftphoneMode()
       ? HA_SOFTPHONE_DEVICE_ID
       : (this.config?.entity_id || this.config?.device_id);
+  }
+
+  _isIncomingSoftphoneRing(state) {
+    const st = String(state || "").toLowerCase();
+    return this._isHaSoftphoneMode() &&
+      (st === "ringing" || st === "incoming") &&
+      !!this._getCallerName();
+  }
+
+  _syncRingtoneRequest(state) {
+    intercomEngine.setRingtoneRequest(
+      this._ringtoneRequestKey,
+      this._isIncomingSoftphoneRing(state) && !this._autoAnswer,
+      this._ringtoneEnabled,
+    );
   }
 
   _softphoneTargetStorageKey() {
@@ -933,6 +952,7 @@ class IntercomCard extends HTMLElement {
     const deviceId = this._getConfigDeviceId();
 
     if (!deviceId) {
+      intercomEngine.clearRingtoneRequest(this._ringtoneRequestKey);
       this._renderUnconfigured(name);
       return;
     }
@@ -981,6 +1001,7 @@ class IntercomCard extends HTMLElement {
       els.statusReason.hidden = false;
       els.stats.textContent = "";
       els.err.textContent = "";
+      intercomEngine.clearRingtoneRequest(this._ringtoneRequestKey);
       return;
     }
     els.offlinePanel.hidden = true;
@@ -1039,6 +1060,7 @@ class IntercomCard extends HTMLElement {
 
     if (this._starting) statusText = "Connecting...";
     if (this._stopping) statusText = "Ending call...";
+    this._syncRingtoneRequest(espState);
 
     els.headerName.textContent = this._formatHeaderTitle(displayName);
 
@@ -1077,11 +1099,17 @@ class IntercomCard extends HTMLElement {
     els.statusReason.textContent = statusReason;
     els.statusReason.hidden = !statusReason;
 
-    // Auto-answer row (only when call button is the visible action)
-    els.autoAnswerRow.hidden = !showCall;
+    // Runtime options are idle-only. During ringing/streaming the card shows
+    // only call actions, so DND/ringtone toggles cannot be changed mid-call.
+    const showRuntimeOptions = showCall && !this._starting && !this._stopping;
+    els.autoAnswerRow.hidden = !showRuntimeOptions;
     els.autoAnswerCheckbox.checked = !!this._autoAnswer;
+    if (els.ringtoneRow) {
+      els.ringtoneRow.hidden = !(showRuntimeOptions && this._isHaSoftphoneMode());
+      els.ringtoneCheckbox.checked = !!this._ringtoneEnabled;
+    }
     if (els.dndRow) {
-      els.dndRow.hidden = !this._isHaSoftphoneMode();
+      els.dndRow.hidden = !(showRuntimeOptions && this._isHaSoftphoneMode());
       els.dndCheckbox.checked = !!this._softphoneDnd;
     }
 
@@ -1342,6 +1370,18 @@ class IntercomCard extends HTMLElement {
     dndRow.appendChild(dndLabel);
     card.appendChild(dndRow);
 
+    const ringtoneRow = document.createElement("div");
+    ringtoneRow.className = "auto-answer-row";
+    const ringtoneCheckbox = document.createElement("input");
+    ringtoneCheckbox.type = "checkbox";
+    ringtoneCheckbox.id = "ha-softphone-ringtone-cb";
+    const ringtoneLabel = document.createElement("label");
+    ringtoneLabel.htmlFor = "ha-softphone-ringtone-cb";
+    ringtoneLabel.textContent = "Ringtone";
+    ringtoneRow.appendChild(ringtoneCheckbox);
+    ringtoneRow.appendChild(ringtoneLabel);
+    card.appendChild(ringtoneRow);
+
     const stats = document.createElement("div");
     stats.className = "stats";
     card.appendChild(stats);
@@ -1362,7 +1402,7 @@ class IntercomCard extends HTMLElement {
       destRow, destValueWrap, destValue, destSelect, prevBtn, nextBtn, offlinePanel,
       answerBtn, declineBtn, hangupBtn, callBtn, placeholderBtn,
       statusIndicator, statusText, statusReason,
-      autoAnswerRow, autoAnswerCheckbox, dndRow, dndCheckbox,
+      autoAnswerRow, autoAnswerCheckbox, dndRow, dndCheckbox, ringtoneRow, ringtoneCheckbox,
       stats, err,
     };
 
@@ -1417,6 +1457,7 @@ class IntercomCard extends HTMLElement {
     if (!els) return;
     els.autoAnswerCheckbox.onchange = () => this._toggleAutoAnswer();
     if (els.dndCheckbox) els.dndCheckbox.onchange = () => this._toggleDnd();
+    if (els.ringtoneCheckbox) els.ringtoneCheckbox.onchange = () => this._toggleRingtone();
     els.callBtn.onclick = () => this._startCall();
     els.hangupBtn.onclick = () => this._hangup();
     els.answerBtn.onclick = () => this._answer();
@@ -1747,6 +1788,17 @@ class IntercomCard extends HTMLElement {
           console.warn("intercom: mic permission denied, auto-answer may not work", err);
         });
     }
+    this._render();
+  }
+
+  _toggleRingtone() {
+    this._ringtoneEnabled = !this._ringtoneEnabled;
+    const deviceId = this._autoAnswerStorageId();
+    if (deviceId) {
+      localStorage.setItem(`intercom_ringtone_${deviceId}`, this._ringtoneEnabled.toString());
+    }
+    if (this._ringtoneEnabled) intercomEngine.unlockRingtone();
+    this._syncRingtoneRequest(this._getEspState());
     this._render();
   }
 

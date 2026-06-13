@@ -2,6 +2,8 @@ const HA_SOFTPHONE_DEVICE_ID = "__intercom_native_ha_softphone__";
 const WS_AUDIO = 1;
 const WS_SUBSCRIBE_CALL_EVENTS = "intercom_native/subscribe_call_events";
 const ASSET_V = "3";
+const { RINGTONE_REPEAT_MS, playIntercomRingtone } =
+  await import(`./ringtone.js?v=${encodeURIComponent(ASSET_V)}`);
 const HIDDEN_HANGUP_GRACE_MS = 15000;
 const CONTROL_ACK_TIMEOUT_MS = 3000;
 const ENGINE_TRANSITIONS = {
@@ -23,6 +25,7 @@ class IntercomEngine extends EventTarget {
     this._audioMode = "full_duplex";
     this._txFormat = LEGACY_FORMAT;
     this._rxFormat = LEGACY_FORMAT;
+    this._lastSessionPayload = null;
     this._mediaStream = null;
     this._audioContext = null;
     this._captureNode = null;
@@ -36,6 +39,9 @@ class IntercomEngine extends EventTarget {
     this._lastEvents = new Map();
     this._hiddenTimer = null;
     this._controlWaiter = null;
+    this._ringtoneRequests = new Map();
+    this._ringtoneContext = null;
+    this._ringtoneTimer = null;
 
     window.addEventListener("pagehide", () => this.close("pagehide", { sendHangup: false }));
     document.addEventListener("visibilitychange", () => this._onVisibility());
@@ -137,6 +143,56 @@ class IntercomEngine extends EventTarget {
     }
   }
 
+  setRingtoneRequest(key, active, enabled) {
+    if (!key) return;
+    const shouldRing = !!active && !!enabled;
+    if (shouldRing) this._ringtoneRequests.set(key, true);
+    else this._ringtoneRequests.delete(key);
+    this._syncRingtone();
+  }
+
+  clearRingtoneRequest(key) {
+    if (!key) return;
+    this._ringtoneRequests.delete(key);
+    this._syncRingtone();
+  }
+
+  unlockRingtone() {
+    this._ensureRingtoneContext()
+      ?.resume()
+      .catch((err) => console.warn("intercom-engine: ringtone unlock failed", err));
+  }
+
+  _syncRingtone() {
+    if (this._ringtoneRequests.size > 0) this._startRingtone();
+    else this._stopRingtone();
+  }
+
+  _ensureRingtoneContext() {
+    if (this._ringtoneContext) return this._ringtoneContext;
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return null;
+    this._ringtoneContext = new Ctor();
+    return this._ringtoneContext;
+  }
+
+  _startRingtone() {
+    if (this._ringtoneTimer !== null) return;
+    const ctx = this._ensureRingtoneContext();
+    if (!ctx) return;
+    ctx.resume().catch((err) => console.warn("intercom-engine: ringtone resume failed", err));
+    const tick = () => playIntercomRingtone(ctx);
+    tick();
+    this._ringtoneTimer = window.setInterval(tick, RINGTONE_REPEAT_MS);
+  }
+
+  _stopRingtone() {
+    if (this._ringtoneTimer !== null) {
+      window.clearInterval(this._ringtoneTimer);
+      this._ringtoneTimer = null;
+    }
+  }
+
   async _wsUrl(deviceId) {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const path = `/api/intercom_native/ws?device_id=${encodeURIComponent(deviceId)}`;
@@ -148,6 +204,7 @@ class IntercomEngine extends EventTarget {
     if (this._ws && this._deviceId === deviceId && this._ws.readyState === WebSocket.OPEN) return;
     await this.close("switch");
     this._deviceId = deviceId;
+    this._lastSessionPayload = null;
     this._ws = new WebSocket(await this._wsUrl(deviceId));
     this._ws.binaryType = "arraybuffer";
     this._ws.onmessage = (event) => this._handleMessage(event);
@@ -205,6 +262,7 @@ class IntercomEngine extends EventTarget {
     if (typeof event.data === "string") {
       try {
         const msg = JSON.parse(event.data);
+        if (msg.tx_format || msg.rx_format) this._lastSessionPayload = msg;
         if (msg.state) this._setState(String(msg.state).toUpperCase());
         if (msg.error) this.dispatchEvent(new CustomEvent("error", { detail: msg.error }));
         this._resolveControlWaiter(msg);
@@ -347,12 +405,14 @@ class IntercomEngine extends EventTarget {
     const deviceId = sessionDeviceId || deviceInfo.device_id;
     await this._connect(deviceId);
     this._resetStats();
+    const initial = this._lastSessionPayload;
+    if (!await this._setupAudioOrAbort(deviceId, { ...(deviceInfo || {}), device_id: deviceId }, initial)) return;
     const reply = await this._sendControl({ type: "answer", device_id: deviceId, host: deviceInfo?.host || "" }, true);
     if (reply?.state !== "streaming") {
       this._setState("ERROR");
+      await this.stop(deviceId).catch(() => this.close("answer_failed"));
       return;
     }
-    if (!await this._setupAudioOrAbort(deviceId, { ...(deviceInfo || {}), device_id: deviceId }, reply)) return;
     this._setState("STREAMING");
   }
 
@@ -407,6 +467,7 @@ class IntercomEngine extends EventTarget {
   }
 
   async _cleanupAudio(_reason) {
+    this._stopRingtone();
     if (this._hiddenTimer !== null) {
       window.clearTimeout(this._hiddenTimer);
       this._hiddenTimer = null;

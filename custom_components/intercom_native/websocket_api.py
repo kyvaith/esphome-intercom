@@ -2250,5 +2250,10 @@ async def websocket_decline(
 
     _LOGGER.debug("Decline request for device: %s", device_id)
 
-    stopped = await _stop_device_sessions(device_id, hass=hass)
+    session = _sessions.pop(device_id, None)
+    if session is not None:
+        stopped = await session.decline(TerminalReason.DECLINED.value)
+        _LOGGER.debug("Session declined: %s", device_id)
+    else:
+        stopped = await _stop_device_sessions(device_id, hass=hass)
     connection.send_result(msg_id, {"success": True, "stopped": stopped})

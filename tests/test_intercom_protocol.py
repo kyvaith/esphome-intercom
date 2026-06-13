@@ -172,6 +172,7 @@ class FakeTransport:
         self.stop_count = 0
         self.disconnect_count = 0
         self.audio_sent = []
+        self.decline_reasons = []
         self.peer_tx_formats = [audio_format.LEGACY_AUDIO_FORMAT]
         self.peer_rx_formats = [audio_format.LEGACY_AUDIO_FORMAT]
         self.local_tx_formats = [audio_format.LEGACY_AUDIO_FORMAT]
@@ -215,6 +216,10 @@ class FakeTransport:
         return True
 
     async def send_ring(self):
+        return True
+
+    async def send_decline(self, reason=""):
+        self.decline_reasons.append(reason)
         return True
 
 
@@ -680,6 +685,15 @@ class IntercomSessionFsmTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ringing[0]["caller"], "Porta")
         self.assertTrue(await session.answer())
         self.assertIs(session.state, fsm.SessionState.STREAMING)
+
+    async def test_decline_incoming_ring_sends_decline_not_hangup(self) -> None:
+        transport = FakeTransport()
+        session = self._session(transport)
+        self.assertTrue(await session.start_ringing(caller_name="Porta"))
+        self.assertTrue(await session.decline(fsm.TerminalReason.DECLINED.value))
+        self.assertEqual(transport.decline_reasons, [fsm.TerminalReason.DECLINED.value])
+        self.assertEqual(transport.stop_count, 0)
+        self.assertIs(session.state, fsm.SessionState.ENDED)
 
     async def test_inbound_answer_uses_session_peer_formats(self) -> None:
         fmt = audio_format.AudioFormat(48000, audio_format.PcmFormat.S32LE, 1, 20)
