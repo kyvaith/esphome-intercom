@@ -1541,8 +1541,8 @@ class IntercomCard extends HTMLElement {
     this._render();
 
     try {
-      await intercomEngine.startHaSoftphone(target, sessionInfo);
-      this._sessionState = "calling";
+      const reply = await intercomEngine.startHaSoftphone(target, sessionInfo);
+      this._sessionState = (reply?.state || "calling").toLowerCase();
       this._destRinging = false;
       this._sessionCaller = target.name || "";
     } catch (err) {

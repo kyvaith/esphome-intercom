@@ -340,6 +340,7 @@ class IntercomEngine extends EventTarget {
       reply,
     )) return;
     this._setState(reply.state);
+    return reply;
   }
 
   async answer(deviceInfo, sessionDeviceId) {
