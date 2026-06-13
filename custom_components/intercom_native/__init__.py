@@ -44,6 +44,7 @@ from .audio_format import (
 from .peer import Peer
 from .websocket_api import (
     async_register_websocket_api,
+    _async_load_ha_softphone_store,
     _get_intercom_devices,
     _stop_device_sessions,
     _find_bridge_by_source,
@@ -1016,6 +1017,7 @@ async def _async_setup_shared(hass: HomeAssistant, config: dict | None = None) -
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["initialized"] = True
 
+    await _async_load_ha_softphone_store(hass)
     async_register_websocket_api(hass)
     await _async_register_services(hass)
 

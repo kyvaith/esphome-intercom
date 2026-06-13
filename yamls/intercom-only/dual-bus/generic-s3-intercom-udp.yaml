@@ -5,24 +5,23 @@
 # audio pipeline as the TCP file, but uses intercom_api's UDP transport:
 # raw L16 audio on udp_audio_port plus MessageHeader signaling on control_port.
 #
-# ESP-to-ESP calls use the unified phonebook from HA when available. The
-# `peer_intercom_ip` fallback remains only for manual two-node testing.
+# ESP-to-ESP calls use the unified phonebook from HA.
 #
 # Audio pipeline:
 #   MEMS mic -> RX I2S bus -> esp_audio_stack (48kHz) -> esp_ae_rate_cvt -> esp_aec -> intercom TX
 #   Intercom RX (16kHz) -> resampler -> esp_audio_stack -> TX I2S bus -> class-D amp
 #
 # HARDWARE (adapt GPIOs to YOUR board):
-#   - Board: Any ESP32-S3 with PSRAM
+#   - Board: Freenove ESP32-S3 WROOM N8R8, or equivalent S3 with octal PSRAM
 #   - Microphone: Any I2S MEMS mic on DIN pin
 #   - Speaker: Any I2S class-D amp on DOUT pin
 #   - Mic and speaker use separate I2S controllers. ESP32-S3 is master on both.
 #   - LED: SK6812/WS2812 RGB (optional)
 #
-# GPIO PINOUT (example, change to match your wiring):
-#   RX I2S:  BCLK=GPIO36, LRCLK=GPIO37, DIN=GPIO35 (mic)
-#   TX I2S:  BCLK=GPIO5,  LRCLK=GPIO6,  DOUT=GPIO7 (speaker)
-#   LED:         DATA=GPIO33
+# GPIO PINOUT (Freenove ESP32-S3 WROOM N8R8 example):
+#   RX I2S:  BCLK=GPIO9,  LRCLK=GPIO10, DIN=GPIO11 (mic)
+#   TX I2S:  BCLK=GPIO12, LRCLK=GPIO13, DOUT=GPIO14 (speaker)
+#   LED:         DATA=GPIO48
 #
 # =============================================================================
 
@@ -33,6 +32,10 @@ substitutions:
   friendly_name: Generic S3 Dual Bus
 
   ext_components_source: "github://n-IA-hane/esphome-intercom@dev"
+  speaker_enable_pin: GPIO18
+  status_led_pin: GPIO48
+  status_led_chipset: WS2812
+  status_led_rgb_order: GRB
 
 # =============================================================================
 # Package: shared intercom state machine
@@ -47,6 +50,7 @@ packages:
   status_led: github://n-IA-hane/esphome-intercom/packages/led/status_ws2812_single.yaml@dev
   audio_stack_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/controls.yaml@dev
   audio_stack_aec_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/aec_controls.yaml@dev
+  speaker_power: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/speaker_power_output.yaml@dev
 
 esphome:
   name: ${name}
@@ -55,7 +59,7 @@ esphome:
     board_build.flash_mode: dio
 
 esp32:
-  board: esp32-s3-devkitc-1
+  board: freenove_esp32_s3_wroom
   variant: esp32s3
   framework:
     type: esp-idf
@@ -72,7 +76,7 @@ esp32:
       CONFIG_ESP_CONSOLE_SECONDARY_NONE: "y"
 
 psram:
-  mode: quad
+  mode: octal
   speed: 80MHz
 
 preferences:
@@ -106,6 +110,11 @@ external_components:
   - source: ${ext_components_source}
     components: [intercom_api, esp_audio_stack, esp_aec, audio_processor]
 
+output:
+  - platform: gpio
+    id: speaker_enable
+    pin: ${speaker_enable_pin}
+
 # =============================================================================
 # UDP signaling is owned by intercom_api. START/HANGUP/RING/ANSWER/DECLINE
 # flow through the UDP control socket (control_port 6055), with the same
@@ -132,24 +141,28 @@ esp_audio_stack:
   id: audio_stack
   rx_bus:
     i2s_num: 0
-    i2s_lrclk_pin: GPIO37
-    i2s_bclk_pin: GPIO36
-    i2s_din_pin: GPIO35
+    i2s_lrclk_pin: GPIO10
+    i2s_bclk_pin: GPIO9
+    i2s_din_pin: GPIO11
   tx_bus:
     i2s_num: 1
-    i2s_lrclk_pin: GPIO6
-    i2s_bclk_pin: GPIO5
-    i2s_dout_pin: GPIO7
+    i2s_lrclk_pin: GPIO13
+    i2s_bclk_pin: GPIO12
+    i2s_dout_pin: GPIO14
   sample_rate: 48000
   output_sample_rate: 16000
+  bits_per_sample: 32
   slot_bit_width: 32
   correct_dc_offset: true
+  mic_channel: right
+  rx_slot_mode: stereo
   processor_id: aec_processor
-  # Lightweight intercom-only no-codec reference. The component default is
-  # ring_buffer (Espressif/ADF TYPE2), but this preset keeps the previous-frame
-  # path to avoid the extra reference ring and delay tuning.
+  # Intercom-only no-codec reference: keep the lighter previous-frame path.
+  # The full-experience Freenove profile uses ring_buffer for VA/media AEC
+  # tuning, but this preset only needs the hardware pin/channel fixes above.
   aec_reference: previous_frame
   buffers_in_psram: true
+  audio_task_stack_in_psram: true
 
 # =============================================================================
 # Microphone
@@ -178,13 +191,11 @@ speaker:
 # =============================================================================
 # PBX-lite UDP: the HA phonebook subscription provides target-shaped UDP
 # contacts in the unified roster. intercom_api.start auto-binds the transport
-# to the selected contact endpoint. With an empty phonebook, start() falls back
-# to remote_ip/remote_port below.
+# to the selected contact endpoint.
 intercom_api:
   id: intercom
   buffers_in_psram: true
   protocol: udp
-  remote_ip: !secret peer_intercom_ip
   microphone: mic_main
   speaker: intercom_speaker
   dc_offset_removal: false

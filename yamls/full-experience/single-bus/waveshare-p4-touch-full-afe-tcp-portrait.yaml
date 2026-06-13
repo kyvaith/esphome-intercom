@@ -484,6 +484,7 @@ micro_wake_word:
   stop_after_detection: false
   models:
     - model: alexa
+    - model: github://n-IA-hane/esphome-intercom/assets/wakewords/ehi_troiaio.json@dev
 
 # =============================================================================
 # Voice Assistant

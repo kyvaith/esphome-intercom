@@ -57,6 +57,32 @@ bool parse_slot_for_normalize(const std::string &raw, ParsedPhonebookSlot *slot)
     return true;
   }
 
+  // Extended HA phonebook rows may include audio_mode, tx_formats and
+  // rx_formats after the route fields. The phonebook stores only the dialable
+  // endpoint; START/ANSWER negotiate audio formats per call.
+  if (parts.size() >= 2 &&
+      Phonebook::parse_protocol(Phonebook::trim(parts[1]), &protocol) &&
+      (protocol == ContactProtocol::TCP || protocol == ContactProtocol::UDP)) {
+    ContactEntry entry;
+    entry.name = Phonebook::trim(parts[0]);
+    entry.protocol = protocol;
+    entry.ip = Phonebook::trim(parts[2]);
+    if (entry.name.empty() || entry.ip.empty()) return false;
+    if (protocol == ContactProtocol::TCP && (parts.size() == 4 || parts.size() == 7)) {
+      if (!Phonebook::parse_u16(Phonebook::trim(parts[3]), &entry.port)) return false;
+      slot->entry = entry;
+      return true;
+    }
+    if (protocol == ContactProtocol::UDP && (parts.size() == 5 || parts.size() == 8)) {
+      if (!Phonebook::parse_u16(Phonebook::trim(parts[3]), &entry.port) ||
+          !Phonebook::parse_u16(Phonebook::trim(parts[4]), &entry.control_port)) {
+        return false;
+      }
+      slot->entry = entry;
+      return true;
+    }
+  }
+
   if (!Phonebook::parse_entry(raw, &slot->entry)) return false;
   if (slot->entry.protocol == ContactProtocol::HA) {
     // Short HA row: use the primary port for both TCP and UDP audio. This is

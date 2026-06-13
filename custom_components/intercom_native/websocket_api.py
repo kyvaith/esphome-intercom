@@ -62,6 +62,8 @@ CALL_EVENT = "intercom_native.call_event"
 WS_AUDIO_IDLE_TIMEOUT = 5.0
 WS_AUDIO_RECONNECT_GRACE = 15.0
 WS_AUDIO_WATCHDOG_INTERVAL = 1.0
+HA_SOFTPHONE_STORE_KEY = f"{DOMAIN}_ha_softphone"
+HA_SOFTPHONE_STORE_VERSION = 1
 
 
 async def _ws_send_json(ws: web.WebSocketResponse, payload: dict[str, Any]) -> bool:
@@ -87,6 +89,23 @@ def _ha_softphone_store(hass: HomeAssistant) -> dict[str, Any]:
         "ha_softphone",
         {"dnd": False},
     )
+
+
+async def _async_load_ha_softphone_store(hass: HomeAssistant) -> None:
+    from homeassistant.helpers.storage import Store
+
+    store = Store(hass, HA_SOFTPHONE_STORE_VERSION, HA_SOFTPHONE_STORE_KEY)
+    data = await store.async_load() or {}
+    runtime = _ha_softphone_store(hass)
+    runtime["storage"] = store
+    runtime["dnd"] = bool(data.get("dnd", runtime.get("dnd", False)))
+
+
+async def _async_save_ha_softphone_store(hass: HomeAssistant) -> None:
+    runtime = _ha_softphone_store(hass)
+    store = runtime.get("storage")
+    if store is not None:
+        await store.async_save({"dnd": bool(runtime.get("dnd", False))})
 
 
 def _ha_softphone_dnd(hass: HomeAssistant) -> bool:
@@ -335,6 +354,10 @@ class IntercomSession:
         payload = {"device_id": self.device_id, "state": wire}
         payload.update(extra)
         _fire_call_event(self.hass, payload, "session")
+
+        ws = self._audio_ws
+        if ws is not None and not ws.closed:
+            self.hass.async_create_task(_ws_send_json(ws, _session_audio_payload(self, wire)))
 
         if _ha_softphone_session_device_id(self.hass) == self.device_id:
             if target is SessionState.ENDED:
@@ -1824,6 +1847,7 @@ async def websocket_set_ha_softphone_dnd(
 ) -> None:
     store = _ha_softphone_store(hass)
     store["dnd"] = bool(msg["dnd"])
+    await _async_save_ha_softphone_store(hass)
     state = _ha_softphone_state(hass)
     _fire_call_event(hass, state, "session")
     connection.send_result(msg["id"], state)

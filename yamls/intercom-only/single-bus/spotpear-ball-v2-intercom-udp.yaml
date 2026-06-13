@@ -324,15 +324,13 @@ media_player:
 # Intercom API. The HA phonebook sensor publishes target-shaped UDP contacts;
 # their ip/port travel along the CSV so intercom_api.start auto-binds the
 # transport without YAML lookups. RX flows through intercom_speaker (resampler)
-# into audio_mixer for ringtone/intercom co-existence. With an empty phonebook,
-# start() falls back to remote_ip/remote_port below.
+# into audio_mixer for ringtone/intercom co-existence.
 # =============================================================================
 intercom_api:
   task_stacks_in_psram: true
   buffers_in_psram: true
   id: intercom
   protocol: udp
-  remote_ip: !secret peer_intercom_ip
   # remote_port / listen_port / control_port follow the project defaults
   # (6054 audio, 6055 control). Override here only if the host network
   # has them in use.

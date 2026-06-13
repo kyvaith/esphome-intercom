@@ -80,6 +80,7 @@ class IntercomCard extends HTMLElement {
     this._autoAnswer = false;
     this._autoAnswering = false;  // Prevents re-entry during auto-answer
     this._ringtoneEnabled = false;
+    this._settingsOpen = false;
     this._ringtoneRequestKey = `intercom-card-${Math.random().toString(36).slice(2)}`;
     this._deepLinkAnswerConsumed = false;
 
@@ -1099,17 +1100,21 @@ class IntercomCard extends HTMLElement {
     els.statusReason.textContent = statusReason;
     els.statusReason.hidden = !statusReason;
 
-    // Runtime options are idle-only. During ringing/streaming the card shows
-    // only call actions, so DND/ringtone toggles cannot be changed mid-call.
+    // Runtime options are idle-only and live behind a compact settings panel.
+    // During ringing/streaming the card shows only call actions, so toggles
+    // cannot be changed mid-call.
     const showRuntimeOptions = showCall && !this._starting && !this._stopping;
-    els.autoAnswerRow.hidden = !showRuntimeOptions;
+    const showSettingsPanel = showRuntimeOptions && this._settingsOpen;
+    els.settingsBtn.hidden = !showRuntimeOptions;
+    els.settingsPanel.hidden = !showSettingsPanel;
+    els.autoAnswerRow.hidden = !showSettingsPanel;
     els.autoAnswerCheckbox.checked = !!this._autoAnswer;
     if (els.ringtoneRow) {
-      els.ringtoneRow.hidden = !(showRuntimeOptions && this._isHaSoftphoneMode());
+      els.ringtoneRow.hidden = !(showSettingsPanel && this._isHaSoftphoneMode());
       els.ringtoneCheckbox.checked = !!this._ringtoneEnabled;
     }
     if (els.dndRow) {
-      els.dndRow.hidden = !(showRuntimeOptions && this._isHaSoftphoneMode());
+      els.dndRow.hidden = !(showSettingsPanel && this._isHaSoftphoneMode());
       els.dndCheckbox.checked = !!this._softphoneDnd;
     }
 
@@ -1229,9 +1234,27 @@ class IntercomCard extends HTMLElement {
 
       .stats { font-size: 0.75em; color: #666; margin-top: 8px; text-align: center; }
       .error { color: #f44336; font-size: 0.85em; text-align: center; margin-top: 8px; }
+      .settings-btn {
+        display: block;
+        margin: 10px auto 0;
+        border: 1px solid var(--divider-color, #ccc);
+        border-radius: 6px;
+        background: var(--intercom-control-surface);
+        color: var(--primary-text-color);
+        padding: 6px 12px;
+        cursor: pointer;
+        font-size: 0.85em;
+      }
+      .settings-btn[hidden] { display: none; }
+      .settings-panel {
+        margin-top: 10px;
+        padding: 8px 10px;
+        border-top: 1px solid var(--divider-color, #ddd);
+      }
+      .settings-panel[hidden] { display: none; }
       .auto-answer-row {
         display: flex; align-items: center; justify-content: center;
-        gap: 8px; margin-top: 10px; font-size: 0.85em; color: var(--secondary-text-color);
+        gap: 8px; margin-top: 8px; font-size: 0.85em; color: var(--secondary-text-color);
       }
       .auto-answer-row[hidden] { display: none; }
       .auto-answer-row input { cursor: pointer; accent-color: var(--primary-color); }
@@ -1345,6 +1368,16 @@ class IntercomCard extends HTMLElement {
     statusReason.hidden = true;
     card.appendChild(statusReason);
 
+    const settingsBtn = document.createElement("button");
+    settingsBtn.type = "button";
+    settingsBtn.className = "settings-btn";
+    settingsBtn.textContent = "Options";
+    card.appendChild(settingsBtn);
+
+    const settingsPanel = document.createElement("div");
+    settingsPanel.className = "settings-panel";
+    settingsPanel.hidden = true;
+
     // Auto-answer toggle
     const autoAnswerRow = document.createElement("div");
     autoAnswerRow.className = "auto-answer-row";
@@ -1356,7 +1389,7 @@ class IntercomCard extends HTMLElement {
     autoAnswerLabel.textContent = "Auto Answer";
     autoAnswerRow.appendChild(autoAnswerCheckbox);
     autoAnswerRow.appendChild(autoAnswerLabel);
-    card.appendChild(autoAnswerRow);
+    settingsPanel.appendChild(autoAnswerRow);
 
     const dndRow = document.createElement("div");
     dndRow.className = "auto-answer-row";
@@ -1368,7 +1401,7 @@ class IntercomCard extends HTMLElement {
     dndLabel.textContent = "Do Not Disturb";
     dndRow.appendChild(dndCheckbox);
     dndRow.appendChild(dndLabel);
-    card.appendChild(dndRow);
+    settingsPanel.appendChild(dndRow);
 
     const ringtoneRow = document.createElement("div");
     ringtoneRow.className = "auto-answer-row";
@@ -1380,7 +1413,8 @@ class IntercomCard extends HTMLElement {
     ringtoneLabel.textContent = "Ringtone";
     ringtoneRow.appendChild(ringtoneCheckbox);
     ringtoneRow.appendChild(ringtoneLabel);
-    card.appendChild(ringtoneRow);
+    settingsPanel.appendChild(ringtoneRow);
+    card.appendChild(settingsPanel);
 
     const stats = document.createElement("div");
     stats.className = "stats";
@@ -1402,6 +1436,7 @@ class IntercomCard extends HTMLElement {
       destRow, destValueWrap, destValue, destSelect, prevBtn, nextBtn, offlinePanel,
       answerBtn, declineBtn, hangupBtn, callBtn, placeholderBtn,
       statusIndicator, statusText, statusReason,
+      settingsBtn, settingsPanel,
       autoAnswerRow, autoAnswerCheckbox, dndRow, dndCheckbox, ringtoneRow, ringtoneCheckbox,
       stats, err,
     };
@@ -1455,6 +1490,7 @@ class IntercomCard extends HTMLElement {
   _attachEventHandlers() {
     const els = this._els;
     if (!els) return;
+    if (els.settingsBtn) els.settingsBtn.onclick = () => this._toggleSettings();
     els.autoAnswerCheckbox.onchange = () => this._toggleAutoAnswer();
     if (els.dndCheckbox) els.dndCheckbox.onchange = () => this._toggleDnd();
     if (els.ringtoneCheckbox) els.ringtoneCheckbox.onchange = () => this._toggleRingtone();
@@ -1767,6 +1803,7 @@ class IntercomCard extends HTMLElement {
   }
 
   _toggleAutoAnswer() {
+    this._settingsOpen = true;
     this._autoAnswer = !this._autoAnswer;
     const deviceId = this._autoAnswerStorageId();
     if (deviceId) {
@@ -1791,7 +1828,13 @@ class IntercomCard extends HTMLElement {
     this._render();
   }
 
+  _toggleSettings() {
+    this._settingsOpen = !this._settingsOpen;
+    this._render();
+  }
+
   _toggleRingtone() {
+    this._settingsOpen = true;
     this._ringtoneEnabled = !this._ringtoneEnabled;
     const deviceId = this._autoAnswerStorageId();
     if (deviceId) {
@@ -1803,6 +1846,7 @@ class IntercomCard extends HTMLElement {
   }
 
   async _toggleDnd() {
+    this._settingsOpen = true;
     const next = !this._softphoneDnd;
     this._softphoneDnd = next;
     this._render();

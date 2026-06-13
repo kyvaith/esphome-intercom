@@ -5,8 +5,7 @@
 # audio pipeline as the TCP file, but uses intercom_api's UDP transport:
 # raw L16 audio on udp_audio_port plus MessageHeader signaling on control_port.
 #
-# ESP-to-ESP calls use the unified phonebook from HA when available. The
-# `peer_intercom_ip` fallback remains only for manual two-node testing.
+# ESP-to-ESP calls use the unified phonebook from HA.
 #
 # Audio pipeline:
 #   MEMS mic -> esp_audio_stack (48kHz) -> esp_ae_rate_cvt x3 -> esp_aec -> intercom TX
@@ -171,13 +170,11 @@ speaker:
 # =============================================================================
 # PBX-lite UDP: the HA phonebook subscription provides target-shaped UDP
 # contacts in the unified roster. intercom_api.start auto-binds the transport
-# to the selected contact endpoint. With an empty phonebook, start() falls back
-# to remote_ip/remote_port below.
+# to the selected contact endpoint.
 intercom_api:
   id: intercom
   buffers_in_psram: true
   protocol: udp
-  remote_ip: !secret peer_intercom_ip
   microphone: mic_main
   speaker: intercom_speaker
   dc_offset_removal: false
