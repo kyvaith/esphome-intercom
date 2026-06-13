@@ -1,6 +1,13 @@
 # ESP AFE - Full Audio Front-End Pipeline
 
-> ⚠ **Important: `esp_afe` requires `esp_audio_stack` in front of it.** It is **not** a drop-in alternative to `esp_aec` for `intercom_api` standalone setups (dual-bus MEMS + amp without a codec). The AFE pipeline expects fixed 512-sample 16 kHz frames at a steady cadence, which only `esp_audio_stack` produces. If you use `intercom_api` without `esp_audio_stack`, set `processor_id:` to an `esp_aec` component, not `esp_afe`. See [docs/reference.md](../../../docs/reference.md#audio-processing-components) for the full topology matrix.
+> ⚠ **Important: `esp_afe` requires `esp_audio_stack` in front of it.** It is
+> **not** a drop-in processor for standalone native `intercom_api` setups
+> (dual-bus MEMS + amp without the stack). The AFE pipeline expects fixed
+> 512-sample 16 kHz frames at a steady cadence, which only `esp_audio_stack`
+> produces. Standalone `intercom_api` should bind directly to native ESPHome
+> microphone/speaker components. See
+> [docs/reference.md](../../../docs/reference.md#audio-processing-components)
+> for the full topology matrix.
 
 ESPHome component wrapping Espressif's **ESP-SR AFE** (Audio Front End)
 through the official `esp_gmf_afe` element in a GMF pipeline/task. Provides a

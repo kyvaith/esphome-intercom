@@ -73,7 +73,7 @@ microphone:
     i2s_audio_id: rx_i2s
     i2s_din_pin: GPIO11
     channel: right
-    sample_rate: 16000
+    sample_rate: 48000
     bits_per_sample: 32bit
 
 speaker:
@@ -83,7 +83,7 @@ speaker:
     i2s_audio_id: tx_i2s
     i2s_dout_pin: GPIO14
     channel: mono
-    sample_rate: 16000
+    sample_rate: 48000
     bits_per_sample: 16bit
 
 intercom_api:
@@ -93,10 +93,24 @@ intercom_api:
     bits_per_sample: 16
     channels: [0]
   speaker: native_speaker
+  audio:
+    tx:
+      sample_rate: 48000
+      pcm_format: s16le
+      channels: 1
+      frame_ms: 20
+    rx:
+      sample_rate: 48000
+      pcm_format: s16le
+      channels: 1
+      frame_ms: 20
 ```
 
 Use `microphone:` directly instead of `microphone_source:` only when the
-referenced microphone already publishes 16 kHz, 16-bit, mono PCM.
+referenced microphone already publishes the configured `audio.tx` format.
+AFE/AEC-backed branches should keep their intercom-facing TX format at
+`16000:s16le:1:32`; native ESPHome microphone/speaker branches can advertise
+their real format.
 
 ## Mic-Only And Speaker-Only
 

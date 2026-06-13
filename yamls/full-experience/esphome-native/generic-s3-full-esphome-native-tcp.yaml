@@ -57,8 +57,8 @@ substitutions:
   name: generic-s3-full-native-tcp
   friendly_name: Generic S3 Full Native TCP
 
-  ext_components_source: "github://n-IA-hane/esphome-intercom@sendspin-tests"
-  assets_base: "https://github.com/n-IA-hane/esphome-intercom/raw/sendspin-tests/"
+  ext_components_source: "github://n-IA-hane/esphome-intercom@dev"
+  assets_base: "https://github.com/n-IA-hane/esphome-intercom/raw/dev/"
   mic_id: native_mic_raw
   intercom_tcp_port: "6254"
 
@@ -68,18 +68,18 @@ substitutions:
   status_led_rgb_order: GRB
 
 packages:
-  core: github://n-IA-hane/esphome-intercom/packages/va_intercom.yaml@sendspin-tests
-  ota_maintenance: github://n-IA-hane/esphome-intercom/packages/ota/full_native_audio_maintenance.yaml@sendspin-tests
-  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@sendspin-tests
-  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@sendspin-tests
-  speaker_mute: github://n-IA-hane/esphome-intercom/packages/intercom/speaker_mute.yaml@sendspin-tests
-  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@sendspin-tests
-  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@sendspin-tests
-  status_led: github://n-IA-hane/esphome-intercom/packages/led/status_ws2812_single.yaml@sendspin-tests
-  led_state_full: github://n-IA-hane/esphome-intercom/packages/led/state_full_single.yaml@sendspin-tests
-  speaker_mixer: github://n-IA-hane/esphome-intercom/packages/audio/full_mono_mixer_48k.yaml@sendspin-tests
-  speaker_media_player: github://n-IA-hane/esphome-intercom/packages/media_player/full_mono_48k.yaml@sendspin-tests
-  flac_codecs_psram: github://n-IA-hane/esphome-intercom/packages/audio/flac_codecs_psram.yaml@sendspin-tests
+  core: github://n-IA-hane/esphome-intercom/packages/va_intercom.yaml@dev
+  ota_maintenance: github://n-IA-hane/esphome-intercom/packages/ota/full_native_audio_maintenance.yaml@dev
+  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@dev
+  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@dev
+  speaker_mute: github://n-IA-hane/esphome-intercom/packages/intercom/speaker_mute.yaml@dev
+  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@dev
+  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@dev
+  status_led: github://n-IA-hane/esphome-intercom/packages/led/status_ws2812_single.yaml@dev
+  led_state_full: github://n-IA-hane/esphome-intercom/packages/led/state_full_single.yaml@dev
+  speaker_mixer: github://n-IA-hane/esphome-intercom/packages/audio/full_mono_mixer_48k.yaml@dev
+  speaker_media_player: github://n-IA-hane/esphome-intercom/packages/media_player/full_mono_48k.yaml@dev
+  flac_codecs_psram: github://n-IA-hane/esphome-intercom/packages/audio/flac_codecs_psram.yaml@dev
 
 esphome:
   name: ${name}

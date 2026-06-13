@@ -3,9 +3,11 @@
 This directory carries a small project-local fork of ESPHome's `speaker` and
 `speaker.media_player` components.
 
-The fork exists for one product reason: full voice devices must pause media
-cleanly while Home Assistant TTS, Voice Assistant responses, timer alarms and
-intercom audio use the same physical speaker graph.
+The fork exists for legacy/custom YAMLs that still use ESPHome's
+`platform: speaker` media player and need media pause to release the playback
+pipeline cleanly. Maintained full-experience YAMLs now use the source-based
+`speaker_source` media path instead; see
+`packages/media_player/full_mono_48k.yaml`.
 
 ## What Changed
 
@@ -59,7 +61,8 @@ This fork is intentionally narrow:
 
 ## Maintained Usage
 
-The shared full-experience media package enables it:
+Current maintained full-experience YAMLs do not require this fork for their
+main media path. They use:
 
 ```yaml
 packages:
@@ -67,15 +70,15 @@ packages:
   speaker_media_player: !include packages/media_player/full_mono_48k.yaml
 ```
 
-`packages/media_player/full_mono_48k.yaml` sets:
+That package uses `platform: speaker_source`, not `platform: speaker`.
+
+Legacy custom YAMLs that still use ESPHome's speaker media player can set:
 
 ```yaml
 pause_releases_pipeline: true
 ```
 
-Custom full-experience YAMLs that copy only part of the media player block
-should either include that package or carry the same option when they need media
-pause/resume to coexist with TTS, timers and intercom.
+when they need media pause/resume to coexist with TTS, timers and intercom.
 
 ## Upstream Compatibility
 

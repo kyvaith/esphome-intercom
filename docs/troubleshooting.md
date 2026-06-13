@@ -50,8 +50,8 @@ Common symptoms and fixes when setting up ESPHome Intercom.
 3. Check browser console for AudioContext errors.
 4. Try a different browser (Chrome recommended).
 
-Current Chromium and Firefox builds normally accept the 16 kHz capture
-`AudioContext` used by the card. If a browser rejects that requested sample
+Current Chromium and Firefox builds normally accept the negotiated capture
+`AudioContext` sample rate requested by the card. If a browser rejects that
 rate, the capture worklet falls back to browser-rate capture and lightweight
 interpolation. That fallback is for compatibility, not best quality; use an
 up-to-date Chromium/Firefox browser when testing negotiated high-rate audio.

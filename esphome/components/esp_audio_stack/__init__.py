@@ -589,9 +589,8 @@ def _final_validate(config):
             "or esp_aec (standalone echo cancellation), not both."
         )
 
-    # Cross-component validation: check for audio processor conflict with intercom_api.
-    # Both components accept processor_id; if both set it the audio processor is fed
-    # from two producers and races on every frame. Reject at validation time.
+    # Cross-component validation for legacy copied YAMLs. Software processing
+    # belongs on esp_audio_stack; intercom_api consumes the stack facade.
 
     intercom_configs = full_config.get("intercom_api", [])
     if intercom_configs:

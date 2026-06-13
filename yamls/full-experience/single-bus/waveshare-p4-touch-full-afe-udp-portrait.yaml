@@ -49,8 +49,8 @@ substitutions:
 
   # Toggled by scripts/yaml_paths.sh between local (../../../...) and remote
   # release mode.
-  ext_components_source: "github://n-IA-hane/esphome-intercom@sendspin-tests"
-  assets_base: "https://github.com/n-IA-hane/esphome-intercom/raw/sendspin-tests/"
+  ext_components_source: "github://n-IA-hane/esphome-intercom@dev"
+  assets_base: "https://github.com/n-IA-hane/esphome-intercom/raw/dev/"
 
   # Display dimensions (portrait)
   display_width: "800"
@@ -92,21 +92,21 @@ substitutions:
   afe_aec_restore_mode: ALWAYS_ON
 
 packages:
-  p4_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32p4_base.yaml@sendspin-tests
-  p4_c6_sdio: github://n-IA-hane/esphome-intercom/packages/board/esp32p4_c6_sdio.yaml@sendspin-tests
-  p4_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native_no_wifi_signal.yaml@sendspin-tests
-  core: github://n-IA-hane/esphome-intercom/packages/va_intercom.yaml@sendspin-tests
-  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_udp.yaml@sendspin-tests
-  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@sendspin-tests
-  afe_entities: github://n-IA-hane/esphome-intercom/packages/esp_afe/dual_mic_entities.yaml@sendspin-tests
-  audio_stack_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/controls.yaml@sendspin-tests
-  speaker_power: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/speaker_power_output.yaml@sendspin-tests
-  flac_codecs_psram: github://n-IA-hane/esphome-intercom/packages/audio/flac_codecs_psram.yaml@sendspin-tests
-  lvgl_p4_ppa: github://n-IA-hane/esphome-intercom/packages/lvgl/p4_ppa.yaml@sendspin-tests
+  p4_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32p4_base.yaml@dev
+  p4_c6_sdio: github://n-IA-hane/esphome-intercom/packages/board/esp32p4_c6_sdio.yaml@dev
+  p4_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native_no_wifi_signal.yaml@dev
+  core: github://n-IA-hane/esphome-intercom/packages/va_intercom.yaml@dev
+  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_udp.yaml@dev
+  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@dev
+  afe_entities: github://n-IA-hane/esphome-intercom/packages/esp_afe/dual_mic_entities.yaml@dev
+  audio_stack_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/controls.yaml@dev
+  speaker_power: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/speaker_power_output.yaml@dev
+  flac_codecs_psram: github://n-IA-hane/esphome-intercom/packages/audio/flac_codecs_psram.yaml@dev
+  lvgl_p4_ppa: github://n-IA-hane/esphome-intercom/packages/lvgl/p4_ppa.yaml@dev
   # No carousel (lvgl_settings_navigation) on P4: portrait 800x1280 holds all
   # settings in a single scrollable page. See packages/lvgl/lvgl_settings_p4_unified.yaml.
   # _boot package provides the settings_p4_sync_widgets script invoked from on_boot.
-  lvgl_settings_p4_boot: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_p4_unified_boot.yaml@sendspin-tests
+  lvgl_settings_p4_boot: github://n-IA-hane/esphome-intercom/packages/lvgl/lvgl_settings_p4_unified_boot.yaml@dev
 
 # =============================================================================
 # ESP32-P4 BASE CONFIGURATION
@@ -362,15 +362,45 @@ speaker:
     task_stack_in_psram: true
     buffer_duration: 128ms
 
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: true
+
+audio_file:
+  - id: timer_finished_sound
+    file: ${assets_base}assets/sounds/timer_finished.flac
+  - id: intercom_ringing_sound
+    file: ${assets_base}assets/sounds/ringtone.flac
+
+media_source:
+  - platform: audio_http
+    id: media_http_source
+    buffer_size: 131072
+    task_stack_in_psram: true
+  - platform: audio_http
+    id: announcement_http_source
+    buffer_size: 65536
+    task_stack_in_psram: true
+  - platform: audio_file
+    id: announcement_file_source
+    task_stack_in_psram: true
+  - platform: sendspin
+    id: sendspin_media_source
+    sample_rate: 48000
+    buffer_size: 524288
+    initial_static_delay: 180ms
+    static_delay_adjustable: true
+    task_stack_in_psram: true
+    decode_memory: psram
+
 # =============================================================================
 # Media Player (TTS via VA speaker)
 # =============================================================================
 media_player:
-  - platform: speaker
+  - platform: speaker_source
     name: None
     id: speaker_media_player
     internal: false
-    task_stack_in_psram: true
     # Keep source/media volume separate from board loudness: `master_volume`
     # drives the ES8311 DAC, while media_player volume is the speaker/source
     # software layer. The TDM reference is captured from the hardware feedback
@@ -379,20 +409,20 @@ media_player:
     volume_min: 0%
     volume_max: 100%
     volume_increment: 5%
-    pause_releases_pipeline: true
     media_pipeline:
       speaker: media_speaker
       sample_rate: 48000
       format: FLAC
+      sources:
+        - media_http_source
+        - sendspin_media_source
     announcement_pipeline:
       speaker: tts_speaker
       format: FLAC
       sample_rate: 48000
-    files:
-      - id: timer_finished_sound
-        file: ${assets_base}assets/sounds/timer_finished.flac
-      - id: intercom_ringing_sound
-        file: ${assets_base}assets/sounds/ringtone.flac
+      sources:
+        - announcement_http_source
+        - announcement_file_source
     on_announcement:
       - script.execute: update_status
       - if:
@@ -2845,8 +2875,9 @@ script:
           condition:
             switch.is_on: timer_ringing
           then:
-            - media_player.speaker.play_on_device_media_file:
-                media_file: timer_finished_sound
+            - media_player.play_media:
+                id: speaker_media_player
+                media_url: "audio-file://timer_finished_sound"
                 announcement: true
             - delay: 6s
 

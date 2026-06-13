@@ -36,7 +36,7 @@ substitutions:
   name: generic-native-int-spk-udp
   friendly_name: Generic S3 Native Intercom Speaker Only UDP
 
-  ext_components_source: "github://n-IA-hane/esphome-intercom@sendspin-tests"
+  ext_components_source: "github://n-IA-hane/esphome-intercom@dev"
   intercom_udp_audio_port: "6254"
   intercom_udp_control_port: "6255"
 
@@ -46,13 +46,13 @@ substitutions:
   status_led_rgb_order: GRB
 
 packages:
-  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_udp.yaml@sendspin-tests
-  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@sendspin-tests
-  ha_api: github://n-IA-hane/esphome-intercom/packages/intercom/ha_api.yaml@sendspin-tests
-  intercom_auto_entities: github://n-IA-hane/esphome-intercom/packages/intercom/auto_entities.yaml@sendspin-tests
-  intercom_buttons: github://n-IA-hane/esphome-intercom/packages/intercom/buttons_base.yaml@sendspin-tests
-  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@sendspin-tests
-  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@sendspin-tests
+  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_udp.yaml@dev
+  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@dev
+  ha_api: github://n-IA-hane/esphome-intercom/packages/intercom/ha_api.yaml@dev
+  intercom_auto_entities: github://n-IA-hane/esphome-intercom/packages/intercom/auto_entities.yaml@dev
+  intercom_buttons: github://n-IA-hane/esphome-intercom/packages/intercom/buttons_base.yaml@dev
+  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@dev
+  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@dev
 
 esphome:
   name: ${name}
@@ -133,7 +133,7 @@ speaker:
     i2s_audio_id: tx_i2s
     i2s_dout_pin: GPIO14
     channel: mono
-    sample_rate: 16000
+    sample_rate: 48000
     bits_per_sample: 16bit
     buffer_duration: 128ms
     timeout: 500ms
@@ -142,6 +142,12 @@ intercom_api:
   id: intercom
   task_stacks_in_psram: true
   buffers_in_psram: true
+  audio:
+    rx:
+      sample_rate: 48000
+      pcm_format: s16le
+      channels: 1
+      frame_ms: 10
   speaker: intercom_speaker
   dc_offset_removal: false
   ringing_timeout: 30s

@@ -1,6 +1,8 @@
 # audio_processor
 
-Shared C++ interface for audio-processor components. Not a user-facing component on its own: it only exposes the headers that `esp_aec`, `esp_afe`, `esp_audio_stack` and `intercom_api` consume.
+Shared C++ interface for audio-processor components. Not a user-facing
+component on its own: it only exposes the headers consumed by `esp_aec`,
+`esp_afe` and `esp_audio_stack`.
 
 ## Contents
 - [Purpose](#purpose)
@@ -33,9 +35,14 @@ The maintained audio stack supports four topologies:
 | Full intercom + VA, single-bus AEC only | `esp_audio_stack` | `esp_aec` |
 | Full intercom + VA, single-bus full AFE | `esp_audio_stack` | `esp_afe` |
 
-The `AudioProcessor` contract lets `esp_audio_stack` work with any maintained processor at YAML level, and lets future processors drop in without touching the I2S owner. It is also unit-testable: the contract can be mocked without bringing up DMA.
+The `AudioProcessor` contract lets `esp_audio_stack` work with any maintained
+processor at YAML level, and lets future processors drop in without touching the
+I2S owner. It is also unit-testable: the contract can be mocked without bringing
+up DMA.
 
-Note: maintained intercom profiles route audio through `esp_audio_stack`; `intercom_api` is transport/FSM glue in that mode. Its standalone direct `processor_id` path is compile-time gated and kept only for users that build `intercom_api` without `esp_audio_stack`.
+Maintained intercom profiles route software AEC/AFE through `esp_audio_stack`;
+`intercom_api` is transport/FSM glue in that mode and no longer accepts its own
+`processor_id`.
 
 ## YAML usage
 
@@ -100,7 +107,7 @@ Invariants the caller must respect:
 
 ```cpp
 struct FrameSpec {
-  uint32_t sample_rate;     // 16000 in practice
+  uint32_t sample_rate;     // ESP-SR processors publish 16000
   uint8_t  mic_channels;    // 1 or 2 (dual-mic Speech Enhancement)
   uint8_t  ref_channels;    // 0 or 1
   size_t   input_samples;   // per-channel samples expected by process()
@@ -211,6 +218,9 @@ ESP32 only. `ring_buffer_caps.cpp` links against ESP-IDF heap capabilities and
 
 ## Known constraints
 
-- Frame sample counts must match between producer (the processor) and consumer (`esp_audio_stack` or `intercom_api`). Consumers read `frame_spec_revision()` at init and poll in their audio loop; on change they restart to re-read `frame_spec()`.
+- Frame sample counts must match between producer (the processor) and consumer
+  (`esp_audio_stack`). The stack reads `frame_spec_revision()` at init and polls
+  in its audio loop; on change it restarts to re-read `frame_spec()`.
 - ESPHome's default `RingBuffer::create` falls back between pools according to preference. Prefer the `ring_buffer_caps.h` helpers only where strict placement or boot-time placement logs matter.
-- `esp_afe` is type-compatible with `intercom_api.processor_id` but not behaviourally compatible when `intercom_api` runs without `esp_audio_stack` in front. The GMF pipeline needs a steady producer at fixed-size frames.
+- `esp_afe` requires `esp_audio_stack` in front of it. The GMF pipeline needs a
+  steady producer at fixed-size frames.

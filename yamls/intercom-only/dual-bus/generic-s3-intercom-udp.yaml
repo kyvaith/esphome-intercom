@@ -32,21 +32,21 @@ substitutions:
   name: generic-s3-dual-bus
   friendly_name: Generic S3 Dual Bus
 
-  ext_components_source: "github://n-IA-hane/esphome-intercom@sendspin-tests"
+  ext_components_source: "github://n-IA-hane/esphome-intercom@dev"
 
 # =============================================================================
 # Package: shared intercom state machine
 # =============================================================================
 packages:
-  core: github://n-IA-hane/esphome-intercom/packages/intercom_only.yaml@sendspin-tests
-  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@sendspin-tests
-  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_udp.yaml@sendspin-tests
-  speaker_mute: github://n-IA-hane/esphome-intercom/packages/intercom/speaker_mute.yaml@sendspin-tests
-  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@sendspin-tests
-  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@sendspin-tests
-  status_led: github://n-IA-hane/esphome-intercom/packages/led/status_ws2812_single.yaml@sendspin-tests
-  audio_stack_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/controls.yaml@sendspin-tests
-  audio_stack_aec_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/aec_controls.yaml@sendspin-tests
+  core: github://n-IA-hane/esphome-intercom/packages/intercom_only.yaml@dev
+  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@dev
+  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_udp.yaml@dev
+  speaker_mute: github://n-IA-hane/esphome-intercom/packages/intercom/speaker_mute.yaml@dev
+  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@dev
+  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@dev
+  status_led: github://n-IA-hane/esphome-intercom/packages/led/status_ws2812_single.yaml@dev
+  audio_stack_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/controls.yaml@dev
+  audio_stack_aec_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/aec_controls.yaml@dev
 
 esphome:
   name: ${name}

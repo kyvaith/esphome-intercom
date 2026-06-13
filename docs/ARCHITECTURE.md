@@ -114,7 +114,10 @@ The 2-mic feed path runs through Espressif's GMF AFE element/manager, not inline
 
 ## 3. Data flow for the S3 full AFE (MMR: 2-mic Speech Enhancement + AEC + VAD)
 
-One frame = 32 ms = 512 samples @ 16 kHz per channel.
+This diagram shows the Espressif AFE branch. The AFE surface is fixed at 16 kHz
+PCM, so one AFE frame is 32 ms = 512 samples per channel. Native intercom
+microphone/speaker branches outside AFE may negotiate different rates and frame
+durations.
 
 ```
   ES7210 (2 mic + ref TDM) ─DMA─▶ i2s_audio_task (core 0, prio 19)

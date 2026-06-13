@@ -185,17 +185,25 @@ The validation between `esp_audio_stack` and `intercom_api` is a conflict
 guard, not a coupling requirement. It only rejects configurations where both
 components try to own the same processor or DC-offset correction stage.
 
-### Speaker media-player fork
+### Full-experience media path
 
-Full-experience YAMLs that expose Home Assistant media playback include the
-project-local [`speaker`](../esphome/components/speaker/README.md) fork. It is
-not an audio backend and does not own I2S. Its maintained addition is
-`pause_releases_pipeline`, used so HA media pause releases the media pipeline
-before Voice Assistant TTS, timer alarms or intercom audio use the same
-mixer/speaker graph.
+Maintained full-experience YAMLs expose Home Assistant media through the
+source-based `speaker_source` media player. Normal HA media, announcements,
+local audio files and optional Sendspin streams enter one media player; the
+mixer remains the only arbitration point before the hardware speaker and
+intercom keeps its dedicated mixer source.
 
-If you copy a full-experience media-player block manually, include the `speaker`
-external component and keep:
+The project-local [`speaker`](../esphome/components/speaker/README.md) fork is
+now a legacy compatibility layer for custom YAMLs that still use ESPHome's
+`platform: speaker` media player. Current full-experience packages should use:
+
+```yaml
+media_player:
+  - platform: speaker_source
+```
+
+If you copy an older full-experience media-player block manually, include the
+`speaker` external component and keep:
 
 ```yaml
 media_player:

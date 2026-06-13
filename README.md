@@ -3,6 +3,16 @@
 [![Platform](https://img.shields.io/badge/Platform-ESP32--S3%20%7C%20ESP32--P4-blue.svg)](#hardware-support)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-native-blue.svg)](https://www.home-assistant.io)
 
+## BREAKING CHANGES for 2026.7.0-dev
+
+`2026.7.0-dev` is a prerelease for the new full-experience media path and the
+first high-rate intercom presets. Maintained full-experience YAMLs now use the
+`speaker_source` media player path with one shared mixer for media,
+announcements, timers and intercom. Sendspin/Music Assistant support is present
+in the full profiles as an experimental media source. Native ESPHome
+intercom-only presets now advertise 48 kHz PCM where their real microphone or
+speaker path supports it. See [`docs/BREAKING_CHANGES.md`](docs/BREAKING_CHANGES.md).
+
 ## BREAKING CHANGES for 2026.6.3
 
 `2026.6.3` moves Lovelace/browser audio off Home Assistant's shared frontend
@@ -88,6 +98,7 @@ _Runtime demo: browser softphone, ESP call state and audio controls moving toget
 ## Table of Contents
 
 - [Breaking changes](docs/BREAKING_CHANGES.md)
+- [What's New](#whats-new)
 - [Overview](#overview)
 - [Quick Start Examples](#quick-start-examples)
 - [Features](#features)
@@ -102,13 +113,57 @@ _Runtime demo: browser softphone, ESP call state and audio controls moving toget
 - [Hardware Support](#hardware-support)
 - [Audio components](#audio-components): esp_audio_stack, esp_aec, esp_afe
 - [Voice Assistant + Intercom Experience](#voice-assistant--intercom-experience)
-- [What's New](#whats-new)
 - [Logging](#logging)
 - [Troubleshooting](#troubleshooting) ([docs/troubleshooting.md](docs/troubleshooting.md))
 - [Deep dives and architecture](docs/)
 - [License](#license)
 
 ## What's New
+
+### 2026.7.0-dev - Full media-source path and high-rate native intercom
+
+`2026.7.0-dev` is a prerelease intended for field testing before the next
+stable release. It keeps the `2026.6.3` binary softphone engine and negotiated
+PCM transport, then updates the maintained YAMLs around that foundation.
+
+Changes since `2026.6.3`:
+
+- Full-experience YAMLs now use the `speaker_source` media player path. Normal
+  HA media, announcements, timer sounds, local audio files and optional
+  Sendspin all enter the same media player, then the mixer arbitrates them
+  against intercom and Voice Assistant audio.
+- Sendspin / Music Assistant is available in maintained full-experience
+  profiles as an experimental source. It is integrated as one source in the
+  media pipeline, not as a second parallel media player. Current defaults use
+  48 kHz mono PCM, PSRAM decode buffers and an adjustable 180 ms static delay.
+- Waveshare P4 full profiles now use the same source-based media path as the
+  S3/Spotpear/generic full profiles while preserving their LVGL callbacks.
+- Native ESPHome intercom-only profiles now run their native I2S microphone and
+  speaker paths at 48 kHz. TCP uses 20 ms frames; UDP uses 10 ms frames so the
+  48 kHz/s16/mono payload stays under the default 1200-byte UDP limit.
+- AFE/AEC-backed intercom-only profiles intentionally keep 16 kHz TX. That is
+  the format emitted by the Espressif AFE/AEC branch. Use Home Assistant PBX
+  bridging when mixing those endpoints with higher-rate native endpoints.
+- ESP endpoint publication now waits for a real IPv4 address from ESPHome's
+  network API and republishes on Wi-Fi or Ethernet IP events. This avoids
+  publishing unusable endpoint rows such as `0.0.0.0`, independent of whether
+  the board uses Wi-Fi or Ethernet.
+- Home Assistant bridge conversion between different negotiated PCM formats now
+  uses a vectorized NumPy converter with anti-aliased sample-rate conversion.
+- Browser/card reload during an active HA softphone call can rebind to the
+  server session within a short grace window instead of immediately losing the
+  call state.
+- UDP audio still defaults to a conservative 1200-byte payload limit, but
+  advanced LAN installs can opt in to a larger `udp_max_payload` on both ESPHome
+  and the HA integration.
+
+Known prerelease status:
+
+- Sendspin is marked experimental in this project. It works through the shared
+  media path, but some device/network combinations may still need tuning for
+  occasional micro-glitches.
+- UDP remains intentionally conservative by default. Raise `udp_max_payload`
+  only after verifying the whole LAN path, or use TCP for larger PCM frames.
 
 ### 2026.6.3 - Binary softphone audio and negotiated PCM formats
 
@@ -209,11 +264,10 @@ call or answer independently from ESP-mirroring hybrid cards._
   reduced display flicker and audio glitches on the Waveshare P4 validation
   target while leaving significantly more largest-free-block headroom than the
   older tuning set.
-- 🔊 The media speaker path now uses the project-local
-  [`speaker`](esphome/components/speaker/README.md) fork only where full voice
-  YAMLs need it. Its `pause_releases_pipeline` mode keeps HA pause/resume
-  semantics while releasing the media pipeline before TTS, timer alarms or
-  intercom audio need the same speaker graph.
+- 🔊 Maintained full-experience YAMLs now use the source-based media path:
+  one `speaker_source` media player owns HA media, announcements, local audio
+  files and optional Sendspin streams, while the mixer arbitrates with
+  intercom and Voice Assistant audio.
 - ⏲️ Voice Assistant timers are now an optional drop-in package. Display devices
   keep the timer-finished screen while the alarm sound plays, and full display
   YAMLs share one reducer-style UI priority model instead of duplicating
@@ -241,7 +295,7 @@ and display-driven voice devices.
 | Full voice device with hardware/DSP echo cancellation | [`generic-s3-full-esphome-native-tcp.yaml`](yamls/full-experience/esphome-native/generic-s3-full-esphome-native-tcp.yaml) or [`generic-s3-full-esphome-native-udp.yaml`](yamls/full-experience/esphome-native/generic-s3-full-esphome-native-udp.yaml) | Full experience on native ESPHome microphone/speaker components. Good starting point for XMOS-style front-ends that already remove echo in hardware. |
 | Standalone native ESPHome intercom | [`yamls/intercom-only/esphome-native/`](yamls/intercom-only/esphome-native/) | Full-duplex, mic-only and speaker-only examples using standard ESPHome audio components, without `esp_audio_stack`. |
 | Audio driver for your own ESPHome Voice Assistant | [`esp_audio_stack`](esphome/components/esp_audio_stack/README.md) | Shared mic/speaker I2S path, speaker reference handling and audio lifecycle support without requiring intercom. |
-| Media pause/resume behavior for full voice profiles | [`speaker` fork](esphome/components/speaker/README.md) | Keeps HA media pause useful while releasing the media pipeline before TTS, timers or intercom use the speaker graph. |
+| Media, announcements and optional Music Assistant / Sendspin for full voice profiles | [`speaker_source` media path](docs/reference.md#full-experience-media-path) | One media player feeds the mixer with HA media, announcements, local files and optional Sendspin streams; intercom keeps its own higher-priority mixer source. |
 
 For the normal intercom use case, do not start by designing a PBX. Pick the
 closest YAML, adapt the board pins and audio hardware, add the ESP through the
@@ -251,17 +305,12 @@ button, LVGL button, automation, service call or Lovelace card.
 
 ### Discovery Rule
 
-If Home Assistant is part of the setup, use the standard HA-managed phonebook:
-each ESP publishes its `intercom_endpoint` through the native ESPHome API, and
-HA publishes the combined roster through `sensor.intercom_phonebook`: the sensor
-state is a short summary (`N entries`) and the full CSV roster lives in the
-`phonebook` attribute, which the standard ESP YAMLs subscribe to.
-
-Do **not** enable ESP-side mDNS discovery for normal HA installs. The optional
-`packages/intercom/mdns_discovery.yaml` package is for ESP-only deployments
-without HA as the phonebook authority. It lets ESPs find each other directly on
-a simple local network, but it is not the routing layer for HA-managed PBX-lite,
-VPN, VLAN, Docker or routed subnet setups.
+If Home Assistant is part of the setup, use the standard HA-managed phonebook.
+Each ESP publishes `intercom_endpoint` through the native ESPHome API, HA builds
+`sensor.intercom_phonebook`, and standard ESP packages subscribe to that roster.
+ESP-side mDNS discovery is only for ESP-only deployments without HA as the
+phonebook authority; see [Phonebook Protocol](docs/PHONEBOOK_PROTOCOL.md) for
+the full contract.
 
 ### PBX-lite mental model
 
@@ -602,23 +651,12 @@ known to pass the audio/control ports cleanly.
 
 _Every callable peer becomes a canonical endpoint row. HA merges rows into the roster consumed by ESPs and the card._
 
-| Side | Service | Carries |
-|---|---|---|
-| Standard ESP firmware | native ESPHome API | `sensor.<device>_intercom_endpoint` = `Name|protocol|ip|ports` |
-| HA phonebook publisher | HA state + attribute | `sensor.intercom_phonebook` state = `N entries`; `phonebook` attribute = canonical CSV roster |
-| ESP-only mDNS package | `_intercom-tcp._tcp` / `_intercom-udp._udp` | TXT `endpoint=<Name|protocol|ip|ports>` |
-| HA when `use_tcp` / `use_udp` | `_intercom-tcp._tcp` / `_intercom-udp._udp` | TXT `endpoint=<Name|ha|ip|tcp|udp_audio|udp_control>` |
-
-Standard HA-managed firmware does not run ESP-side mDNS announce/discovery.
-Include `packages/intercom/mdns_discovery.yaml` only for ESP-only deployments
-that must build a local phonebook without HA. Cross-protocol bridging is HA's
-job, not mDNS's. In HA-managed mode, `sensor.intercom_phonebook` is the source
-of truth; each ESP locally shapes the protocol-aware roster into its own TCP or
-UDP dial plan.
-
-In routed networks, VLANs and VPNs, fix the advertised IPs and routes used by
-`sensor.intercom_phonebook`; do not try to solve HA reachability by enabling
-ESP-side mDNS discovery. mDNS is link-local discovery, not a PBX route.
+Standard HA-managed firmware uses the native ESPHome API endpoint sensor plus
+`sensor.intercom_phonebook`. ESP-side mDNS discovery is opt-in only for ESP-only
+deployments without HA as the phonebook authority; it is not a fix for VLAN,
+VPN, Docker or routed-subnet reachability. The canonical row format, audio
+capability fields and mDNS compatibility mode are documented once in
+[`docs/PHONEBOOK_PROTOCOL.md`](docs/PHONEBOOK_PROTOCOL.md).
 
 ---
 
@@ -723,13 +761,13 @@ by the maintained `esp_audio_stack` YAMLs.
 external_components:
   - source: github://n-IA-hane/esphome-intercom
     ref: main
-    components: [audio_processor, intercom_api, esp_audio_stack, esp_aec, speaker]
+    components: [audio_processor, intercom_api, esp_audio_stack, esp_aec]
 
 # Full AFE pipeline (single-mic NS/AGC/VAD or dual-mic Speech Enhancement/VAD):
 external_components:
   - source: github://n-IA-hane/esphome-intercom
     ref: main
-    components: [audio_processor, intercom_api, esp_afe, esp_audio_stack, speaker]
+    components: [audio_processor, intercom_api, esp_afe, esp_audio_stack]
 ```
 
 > **Note**: `audio_processor` is still listed because it provides shared task
@@ -738,10 +776,10 @@ external_components:
 > [AFE section](#audio-front-end-afe) below). `intercom_api` no longer owns
 > software AEC; standalone intercom binds to native ESPHome
 > `microphone`/`speaker`, while software AEC/AFE belongs behind
-> `esp_audio_stack`. Full voice YAMLs also include the project-local
-> [`speaker`](esphome/components/speaker/README.md) fork for media pause
-> behavior; intercom-only native YAMLs do not need it unless they use
-> `platform: speaker` media playback.
+> `esp_audio_stack`. Maintained full voice YAMLs use the source-based
+> `speaker_source` media path; the project-local
+> [`speaker`](esphome/components/speaker/README.md) fork remains documented for
+> older custom YAMLs that still use ESPHome's `platform: speaker` media player.
 
 #### After ESP Firmware Package Upgrades: Clear ESPHome Build Cache
 
@@ -915,7 +953,12 @@ sensor.intercom_phonebook                       # short state: "N entries"
 sensor.intercom_phonebook.attributes.phonebook  # protocol-aware CSV roster
 ```
 
-The ESP-side package subscribes to the `phonebook` attribute and calls `intercom_api.update_contacts` after a debounce. The HA row (`Name|ha|...`) teaches firmware the HA peer name for `routing_mode: ha_pbx` through the HA-published phonebook. For manual/local automations you can still use the remaining call-control ESPHome actions:
+The ESP-side package subscribes to the `phonebook` attribute and calls
+`intercom_api.update_contacts` after a debounce. The HA row (`Name|ha|...`)
+teaches firmware the HA peer name for `routing_mode: ha_pbx` through the
+HA-published phonebook. Canonical row formats live in
+[`docs/PHONEBOOK_PROTOCOL.md`](docs/PHONEBOOK_PROTOCOL.md). For manual/local
+automations you can still use the remaining call-control ESPHome actions:
 
 ```yaml
 action: esphome.<slug>_set_ha_peer_name
@@ -931,17 +974,11 @@ data:
   reason: "DND"
 ```
 
-Contact mutation is not exposed as HA-callable ESPHome services in the standard packages. Use `sensor.intercom_phonebook` for normal sync, or call the native `intercom_api.set_contacts` / `add_contact` / `remove_contact` / `flush_contacts` actions from YAML scripts when you intentionally need local manual mutation. Dedup is by name only; on endpoint conflict, last writer wins.
-
-Canonical phonebook rows:
-
-```text
-Name|tcp|ip|tcp_port
-Name|udp|ip|udp_audio_port|udp_control_port
-Name|ha|ip|tcp_port|udp_audio_port|udp_control_port
-Name|tcp|ip|tcp_port|audio_mode|tx_formats|rx_formats
-Name|udp|ip|udp_audio_port|udp_control_port|audio_mode|tx_formats|rx_formats
-```
+Contact mutation is not exposed as HA-callable ESPHome services in the standard
+packages. Use `sensor.intercom_phonebook` for normal sync, or call the native
+`intercom_api.set_contacts` / `add_contact` / `remove_contact` /
+`flush_contacts` actions from YAML scripts when you intentionally need local
+manual mutation.
 
 See [docs/PHONEBOOK_PROTOCOL.md](docs/PHONEBOOK_PROTOCOL.md) for the full contract.
 
@@ -1350,11 +1387,13 @@ mic/speaker hardware without hardware echo cancellation. It can also be useful
 outside intercom projects: an ESPHome Voice Assistant device can use it as the
 shared mic/speaker transport and AEC reference path.
 
-Full voice profiles that expose media playback also include the local
-[`speaker`](esphome/components/speaker/README.md) fork. That fork does not own
-I2S; it only adds `pause_releases_pipeline` to the ESPHome speaker media player
-so a paused media stream does not keep the playback pipeline half-owned while
-TTS, timer alarms or intercom audio need the same mixer/speaker graph.
+Full voice profiles that expose media playback use `speaker_source`: HA media,
+announcements, local files and optional Sendspin streams are sources of one
+media player, and the mixer remains the single arbitration point before the
+hardware speaker. Older custom YAMLs that still use ESPHome's
+`platform: speaker` media player can keep using the local
+[`speaker`](esphome/components/speaker/README.md) fork for its pause-release
+compatibility mode.
 
 For a composite device, put the microphone and speaker on the same I2S bus and
 use [`esp_audio_stack`](esphome/components/esp_audio_stack/README.md). The

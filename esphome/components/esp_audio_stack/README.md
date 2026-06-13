@@ -179,7 +179,6 @@ flowchart TD
 |------|------|----------|------|
 | `audio_stack` (audio_task) | **Core 0** | **19** | I2S read/write + rate conversion + audio processor (esp_aec/esp_afe) |
 | `intercom_tx` | Core 0 | 5 | Only when `intercom_api` is present: mic to network |
-| `intercom_spk` | Core 0 | 4 | Only when standalone `intercom_api.processor_id` is used |
 | `intercom_srv` | Core 1 | 5 | Only when `intercom_api` is present: TCP RX, call FSM |
 | `mixer` (ESPHome) | Any | 10 | Mix VA + intercom audio to speaker |
 | `MWW inference` (ESPHome) | Unpinned | 3→**8** | Wake word TFLite inference (boost via on_boot lambda) |
@@ -231,9 +230,8 @@ external_components:
     components: [audio_processor, esp_audio_stack, esp_aec, intercom_api]
 ```
 
-If the device also uses ESPHome's `speaker` media player for HA media/TTS
-playback, full-experience profiles should include the project-local `speaker`
-fork too:
+If the device also exposes HA media/TTS playback, maintained full-experience
+profiles use ESPHome's source-based `speaker_source` media player:
 
 ```yaml
 external_components:
@@ -241,14 +239,14 @@ external_components:
       type: git
       url: https://github.com/n-IA-hane/esphome-intercom
       ref: main
-    components: [audio_processor, esp_audio_stack, esp_aec, intercom_api, speaker]
+    components: [audio_processor, esp_audio_stack, esp_aec, intercom_api]
 ```
 
-That fork does not change I2S ownership. It adds the
-`pause_releases_pipeline` media-player mode documented in
-[`../speaker/README.md`](../speaker/README.md), so paused media does not keep a
-pipeline around while Voice Assistant TTS, timer alarms or intercom audio need
-the same mixer/output graph.
+`speaker_source` keeps one media player as the media/announcement owner and
+feeds the same mixer/output graph that `esp_audio_stack` already arbitrates for
+intercom, Voice Assistant and local files. The project-local
+[`speaker`](../speaker/README.md) fork is only for legacy/custom YAMLs that
+still use `platform: speaker`.
 
 ### Component Boundaries
 
@@ -651,7 +649,12 @@ point, which often results in audible artifacts, worse SNR, and suboptimal
 DAC/ADC performance. At 48 kHz the codec usually produces cleaner audio: lower
 noise floor, better high-frequency response for TTS and media playback.
 
-The challenge: AEC (ESP-SR), Micro Wake Word (TFLite Micro), Voice Assistant STT, and intercom all require **16kHz** input. The solution is to run the I2S bus at 48kHz and convert the mic/ref path to 16kHz with Espressif's official `esp_ae_rate_cvt` from `esp_audio_effects`.
+The challenge: AEC (ESP-SR), Micro Wake Word (TFLite Micro), Voice Assistant
+STT, and any AFE/AEC-backed intercom microphone branch require **16 kHz** input.
+The solution is to run the I2S bus at 48 kHz and convert only the mic/ref path
+to 16 kHz with Espressif's official `esp_ae_rate_cvt` from
+`esp_audio_effects`. Intercom RX and native speaker/media playback can remain
+at the speaker path rate.
 
 #### Signal Flow
 
@@ -660,7 +663,7 @@ The challenge: AEC (ESP-SR), Micro Wake Word (TFLite Micro), Voice Assistant STT
                     │    (native rate, no resampling)
 I2S bus: 48kHz ─────┤
                     │    ┌─ esp_ae_rate_cvt ×3 ─┐
-                    └─── Mic path (48kHz) ───┘──→ 16kHz ──→ AEC / MWW / VA / intercom
+                    └─── Mic path (48kHz) ───┘──→ 16kHz ──→ AEC / MWW / VA / AFE intercom TX
 ```
 
 `esp_ae_rate_cvt` is the standalone C API behind Espressif's GMF `aud_rate_cvt` element. The TDM/stereo path uses one multi-channel converter handle for selected mic/ref channels, so the relative latency between microphones and reference stays coupled. Mono software-reference AEC uses the same converter for both RX mic and TX reference.
@@ -724,7 +727,7 @@ speaker:
     output_speaker: va_speaker_mix
 
   - platform: resampler
-    id: intercom_speaker         # 16kHz intercom RX upsampled → 48kHz
+    id: intercom_speaker         # Converts lower-rate intercom RX only when needed
     output_speaker: intercom_speaker_mix
 ```
 
@@ -736,8 +739,7 @@ HA reads the `sample_rate` from the `announcement_pipeline` in the `media_player
 
 ```yaml
 media_player:
-  - platform: speaker
-    pause_releases_pipeline: true
+  - platform: speaker_source
     announcement_pipeline:
       speaker: va_speaker        # Points to the resampler speaker
       format: FLAC
@@ -916,7 +918,11 @@ binary_sensor:
   `on_start`/`on_idle` for speaker power if wake word or VA can keep the mic
   path active.
 - **Mic Gain**: -20 to +30 dB range (applied post-AEC in audio_task). Stored via `ESPPreferenceObject` and restored on boot. Mic gain is applied to post-AEC output (affects VA/intercom/MWW equally). Values at or below 0 dB use ESPHome's Q31 `esp-audio-libs` gain path, including zero as a `memset()` fast path. Positive gain uses Espressif `esp_ae_alc` with the YAML number's 1 dB step. **Clipping warning**: positive gain can still saturate the PCM stream. On loud speech with gain > +6 dB, peak samples can clip and produce harmonic distortion that degrades STT and intercom audio. If you need gain > +6 dB to bring a weak MEMS mic up to working levels, pair this component with `esp_afe` and `agc_enabled: true`; with standalone `esp_aec` there is no automatic ceiling.
-- **Cross-Component Validation**: `FINAL_VALIDATE_SCHEMA` checks at compile time that `esp_audio_stack` and `intercom_api` don't both configure an audio processor (`processor_id`) or DC offset removal. If both components are present, `esp_audio_stack` takes ownership of audio processing and DC offset; `intercom_api` should NOT set `processor_id` or `dc_offset_removal`.
+- **Cross-Component Validation**: `FINAL_VALIDATE_SCHEMA` rejects legacy copied
+  YAMLs that try to put audio processing or DC-offset correction on
+  `intercom_api`. If both components are present, `esp_audio_stack` owns
+  software AEC/AFE and DC-offset correction; `intercom_api` consumes the stack's
+  microphone/speaker facade.
 
 ### Audio task lifecycle
 

@@ -34,9 +34,9 @@ substitutions:
   name: generic-s3
   friendly_name: Generic S3
 
-  ext_components_source: "github://n-IA-hane/esphome-intercom@sendspin-tests"
+  ext_components_source: "github://n-IA-hane/esphome-intercom@dev"
 
-  assets_base: "https://github.com/n-IA-hane/esphome-intercom/raw/sendspin-tests/"
+  assets_base: "https://github.com/n-IA-hane/esphome-intercom/raw/dev/"
 
   # Microphone ID for package mute switch
   mic_id: mic_main
@@ -49,20 +49,20 @@ substitutions:
 # Package: shared VA + Intercom state machine
 # =============================================================================
 packages:
-  core: github://n-IA-hane/esphome-intercom/packages/va_intercom.yaml@sendspin-tests
-  ota_maintenance: github://n-IA-hane/esphome-intercom/packages/ota/full_audio_maintenance.yaml@sendspin-tests
-  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@sendspin-tests
-  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@sendspin-tests
-  speaker_mute: github://n-IA-hane/esphome-intercom/packages/intercom/speaker_mute.yaml@sendspin-tests
-  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@sendspin-tests
-  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@sendspin-tests
-  status_led: github://n-IA-hane/esphome-intercom/packages/led/status_ws2812_single.yaml@sendspin-tests
-  led_state_full: github://n-IA-hane/esphome-intercom/packages/led/state_full_single.yaml@sendspin-tests
-  speaker_mixer: github://n-IA-hane/esphome-intercom/packages/audio/full_mono_mixer_48k.yaml@sendspin-tests
-  speaker_media_player: github://n-IA-hane/esphome-intercom/packages/media_player/full_mono_48k.yaml@sendspin-tests
-  flac_codecs_psram: github://n-IA-hane/esphome-intercom/packages/audio/flac_codecs_psram.yaml@sendspin-tests
-  audio_stack_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/controls.yaml@sendspin-tests
-  afe_entities: github://n-IA-hane/esphome-intercom/packages/esp_afe/single_mic_entities.yaml@sendspin-tests
+  core: github://n-IA-hane/esphome-intercom/packages/va_intercom.yaml@dev
+  ota_maintenance: github://n-IA-hane/esphome-intercom/packages/ota/full_audio_maintenance.yaml@dev
+  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@dev
+  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@dev
+  speaker_mute: github://n-IA-hane/esphome-intercom/packages/intercom/speaker_mute.yaml@dev
+  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@dev
+  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@dev
+  status_led: github://n-IA-hane/esphome-intercom/packages/led/status_ws2812_single.yaml@dev
+  led_state_full: github://n-IA-hane/esphome-intercom/packages/led/state_full_single.yaml@dev
+  speaker_mixer: github://n-IA-hane/esphome-intercom/packages/audio/full_mono_mixer_48k.yaml@dev
+  speaker_media_player: github://n-IA-hane/esphome-intercom/packages/media_player/full_mono_48k.yaml@dev
+  flac_codecs_psram: github://n-IA-hane/esphome-intercom/packages/audio/flac_codecs_psram.yaml@dev
+  audio_stack_controls: github://n-IA-hane/esphome-intercom/packages/esp_audio_stack/controls.yaml@dev
+  afe_entities: github://n-IA-hane/esphome-intercom/packages/esp_afe/single_mic_entities.yaml@dev
 
 esphome:
   name: ${name}
@@ -209,11 +209,9 @@ speaker:
 
 # Generic AFE targets are intended for 8 MB or larger flash layouts, so keep
 # the full VA timer alarm that the 4 MB AEC-light profile omits.
-media_player:
-  - id: !extend speaker_media_player
-    files:
-      - id: timer_finished_sound
-        file: ${assets_base}assets/sounds/timer_finished.flac
+audio_file:
+  - id: timer_finished_sound
+    file: ${assets_base}assets/sounds/timer_finished.flac
 
 # =============================================================================
 # Micro Wake Word: Device part
@@ -259,8 +257,9 @@ script:
           condition:
             switch.is_on: timer_ringing
           then:
-            - media_player.speaker.play_on_device_media_file:
-                media_file: timer_finished_sound
+            - media_player.play_media:
+                id: speaker_media_player
+                media_url: "audio-file://timer_finished_sound"
                 announcement: true
             - delay: 6s
 

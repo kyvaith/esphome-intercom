@@ -31,7 +31,7 @@ Ready-to-flash full-experience YAMLs include both paths: `generic-s3-full-aec-*`
 | Full AFE presets, codec/TDM boards, or larger flash generic builds | `esp_afe` |
 | Intercom + VA + dual-mic with Speech Enhancement | `esp_afe` |
 | Need noise suppression or AGC on the mic path | `esp_afe` |
-| Standalone `intercom_api` without `esp_audio_stack` (dual-bus MEMS + amp) | `esp_aec` (the AFE feed/fetch model needs the steady frames that `esp_audio_stack` produces) |
+| Standalone native `intercom_api` without `esp_audio_stack` | No software processor; bind directly to ESPHome microphone/speaker. Use `esp_audio_stack` + `esp_aec` when software echo cancellation is required. |
 
 Both components implement `AudioProcessor` at the type level, but `esp_afe` is only safely usable behind `esp_audio_stack`. See [docs/reference.md](../../../docs/reference.md#audio-processing-components).
 
@@ -63,7 +63,7 @@ esp_audio_stack:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `id` | ID | required | Component identifier referenced by `esp_audio_stack.processor_id` or `intercom_api.processor_id`. |
+| `id` | ID | required | Component identifier referenced by `esp_audio_stack.processor_id`. |
 | `sample_rate` | int | 16000 | Must match the sample rate of the consumer. esp-sr's AEC only accepts 16 kHz frames; the upstream component is expected to rate-convert from the I²S bus rate when needed. |
 | `filter_length` | int | 4 | AEC tail length in frames. Frame size depends on `mode`: **32 ms in SR modes, 16 ms in VOIP modes**. Range 1 to 8. Use **4** with SR modes (full-experience with MWW, ~128 ms tail), **8** with VOIP modes (intercom-only, ~128 ms tail). Higher values exit the esp-sr tested range and can trigger silent calloc failures on cross-engine switches. |
 | `mode` | string | `sr_low_cost` | AEC algorithm. Pick the engine to match the use case: **FD modes** for full-duplex codec devices where speaker echo is audible, **SR modes** where wake-word spectral preservation matters more than residual echo suppression, **VOIP modes** for intercom-only. Public YAMLs in this repo restrict or order runtime choices per target - see "Runtime mode switching" below. |
@@ -192,7 +192,8 @@ To mute AEC chatter without losing project-wide DEBUG: `logger.logs.esp_aec: INF
 ## Troubleshooting
 
 **Echo cancellation does nothing.**
-Make sure the consumer (typically `esp_audio_stack` or `intercom_api`) actually links `processor_id: aec_processor`. The component initialises silently even when nobody references it.
+Make sure `esp_audio_stack` actually links `processor_id: aec_processor`. The
+component initialises silently even when nobody references it.
 
 **The far end still hears the speaker on a codec-backed full-duplex device.**
 Use `fd_low_cost` first. For ES8311 digital feedback, verify
