@@ -26,6 +26,7 @@ class IntercomEngine extends EventTarget {
     this._mediaStream = null;
     this._audioContext = null;
     this._captureNode = null;
+    this._captureSink = null;
     this._source = null;
     this._playbackNode = null;
     this._stats = { sent: 0, received: 0, buffered_frames: 0, frames_drop: 0 };
@@ -272,6 +273,9 @@ class IntercomEngine extends EventTarget {
         if (event.data?.type === "audio") this._sendAudio(event.data.buffer);
       };
       this._source.connect(this._captureNode);
+      this._captureSink = this._audioContext.createGain();
+      this._captureSink.gain.value = 0;
+      this._captureNode.connect(this._captureSink).connect(this._audioContext.destination);
     }
 
     if (receiveFromEsp) {
@@ -412,6 +416,7 @@ class IntercomEngine extends EventTarget {
       this._controlWaiter = null;
     }
     if (this._captureNode) { this._captureNode.disconnect(); this._captureNode = null; }
+    if (this._captureSink) { this._captureSink.disconnect(); this._captureSink = null; }
     if (this._source) { this._source.disconnect(); this._source = null; }
     if (this._mediaStream) { this._mediaStream.getTracks().forEach((t) => t.stop()); this._mediaStream = null; }
     if (this._playbackNode) { this._playbackNode.disconnect(); this._playbackNode = null; }

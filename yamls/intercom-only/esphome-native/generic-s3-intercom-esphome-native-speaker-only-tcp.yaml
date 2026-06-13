@@ -36,7 +36,7 @@ substitutions:
   name: generic-native-int-spk-tcp
   friendly_name: Generic S3 Native Intercom Speaker Only TCP
 
-  ext_components_source: "github://n-IA-hane/esphome-intercom@dev"
+  ext_components_source: "github://n-IA-hane/esphome-intercom@sendspin-tests"
   intercom_tcp_port: "6054"
 
   speaker_enable_pin: GPIO18
@@ -45,13 +45,13 @@ substitutions:
   status_led_rgb_order: GRB
 
 packages:
-  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@dev
-  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@dev
-  ha_api: github://n-IA-hane/esphome-intercom/packages/intercom/ha_api.yaml@dev
-  intercom_auto_entities: github://n-IA-hane/esphome-intercom/packages/intercom/auto_entities.yaml@dev
-  intercom_buttons: github://n-IA-hane/esphome-intercom/packages/intercom/buttons_base.yaml@dev
-  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@dev
-  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@dev
+  intercom_transport: github://n-IA-hane/esphome-intercom/packages/intercom/transport_tcp.yaml@sendspin-tests
+  phonebook_subscribe: github://n-IA-hane/esphome-intercom/packages/intercom/phonebook_subscribe.yaml@sendspin-tests
+  ha_api: github://n-IA-hane/esphome-intercom/packages/intercom/ha_api.yaml@sendspin-tests
+  intercom_auto_entities: github://n-IA-hane/esphome-intercom/packages/intercom/auto_entities.yaml@sendspin-tests
+  intercom_buttons: github://n-IA-hane/esphome-intercom/packages/intercom/buttons_base.yaml@sendspin-tests
+  s3_base: github://n-IA-hane/esphome-intercom/packages/platform/esp32s3_base.yaml@sendspin-tests
+  native_diagnostics: github://n-IA-hane/esphome-intercom/packages/diagnostics/native.yaml@sendspin-tests
 
 esphome:
   name: ${name}

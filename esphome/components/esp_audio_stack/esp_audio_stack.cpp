@@ -1397,7 +1397,9 @@ size_t ESPAudioStack::play(const uint8_t *data, size_t len, TickType_t ticks_to_
     return 0;
   }
 
-  // Data arrives at bus rate (e.g. 48kHz from mixer/resampler). Write directly.
+  // Data arrives at bus rate (e.g. 48kHz from mixer/resampler). Partial writes
+  // are allowed here because upstream ESPHome sources can push chunks larger
+  // than the currently free ring space and retry the unwritten tail.
   size_t written = this->speaker_buffer_->write_without_replacement((void *) data, len, ticks_to_wait, true);
 
   if (written > 0) {

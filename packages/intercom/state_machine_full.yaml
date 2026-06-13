@@ -160,6 +160,7 @@ script:
               - not:
                   intercom_api.is_idle: intercom
               - media_player.is_announcing:
+                  id: speaker_media_player
           then:
             - if:
                 condition:
@@ -247,6 +248,7 @@ script:
                   micro_wake_word.is_running:
               - not:
                   media_player.is_announcing:
+                    id: speaker_media_player
               - intercom_api.is_idle: intercom
           then:
             - logger.log:
@@ -282,6 +284,7 @@ script:
           condition:
             or:
               - media_player.is_announcing:
+                  id: speaker_media_player
               - speaker.is_playing:
                   id: tts_speaker
           timeout: 2s
@@ -290,6 +293,7 @@ script:
             and:
               - not:
                   media_player.is_announcing:
+                    id: speaker_media_player
               - not:
                   speaker.is_playing:
                       id: tts_speaker
@@ -300,6 +304,7 @@ script:
           condition:
             or:
               - media_player.is_announcing:
+                  id: speaker_media_player
               - speaker.is_playing:
                   id: tts_speaker
           then:
@@ -307,6 +312,7 @@ script:
                 level: WARN
                 format: "VA: TTS drain timeout, forcing cleanup"
             - media_player.stop:
+                id: speaker_media_player
                 announcement: true
       - delay: 100ms
       - voice_assistant.stop:
@@ -382,16 +388,19 @@ script:
           condition:
             intercom_api.is_ringing: intercom
           then:
-            - media_player.speaker.play_on_device_media_file:
-                media_file: intercom_ringing_sound
+            - media_player.play_media:
+                id: speaker_media_player
+                media_url: "audio-file://intercom_ringing_sound"
                 announcement: true
             - wait_until:
                 condition:
                   media_player.is_announcing:
+                    id: speaker_media_player
                 timeout: 2s
             - wait_until:
                 condition:
                   not:
                     media_player.is_announcing:
+                      id: speaker_media_player
                 timeout: 5s
             - delay: 1s
