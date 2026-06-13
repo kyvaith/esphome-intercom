@@ -6,45 +6,27 @@
 ## BREAKING CHANGES for 2026.7.0-dev
 
 `2026.7.0-dev` is a prerelease for the new full-experience media path and the
-first high-rate intercom presets. Maintained full-experience YAMLs now use the
-`speaker_source` media player path with one shared mixer for media,
-announcements, timers and intercom. Sendspin/Music Assistant support is present
-in the full profiles as an experimental media source. Native ESPHome
-intercom-only presets now advertise 48 kHz PCM where their real microphone or
-speaker path supports it. See [`docs/BREAKING_CHANGES.md`](docs/BREAKING_CHANGES.md).
-
-## BREAKING CHANGES for 2026.6.3
-
-`2026.6.3` moves Lovelace/browser audio off Home Assistant's shared frontend
-WebSocket. The card now uses the authenticated `/api/intercom_native/ws`
-endpoint with negotiated binary PCM frames, one page-level audio engine and
-server-authoritative call teardown. Custom clients using the removed
-`intercom_native/audio` or `intercom_native/subscribe_audio` JSON/base64
-commands must migrate before upgrading. See
-[`docs/BREAKING_CHANGES.md`](docs/BREAKING_CHANGES.md).
-
-## BREAKING CHANGES for 2026.6.2
-
-`2026.6.2` is a stabilization update focused on the Home Assistant softphone
-card, external PBX-lite callers, runtime audio controls, timer UI ownership and
-maintained package defaults.
-
-Read the dedicated [breaking changes guide](docs/BREAKING_CHANGES.md) before
-flashing ESP firmware or restarting Home Assistant if you use custom YAMLs,
-custom automations, routed subnets/VLANs/VPNs, or copied Lovelace card YAML.
+first high-rate native intercom presets. These notes cover only changes from
+`2026.6.3`.
 
 Action required:
 
-- Home Assistant softphone cards are now independent endpoints. Use
-  `mode: ha_softphone` without `device_id`; only the default `hybrid` mode is
-  bound to one ESP device.
-- Card configuration was cleaned up. Use `show_extended_info`; old copied card
-  configs using the previous extended-info key must be updated.
-- Maintained full AFE profiles now boot with AEC/VAD ON and FD high-perf where
-  the target has enough resources. If you copied old full AFE YAML blocks,
-  ensure HA restore values do not overwrite the boot pipeline unexpectedly.
-- Voice Assistant timers are now an optional package; include them only on
-  devices that should expose timer behavior or UI hooks.
+- Maintained full-experience YAMLs now use the `speaker_source` media path:
+  media, announcements, timers, local files and optional Sendspin enter one
+  media player, then the mixer arbitrates them against intercom and Voice
+  Assistant.
+- Custom full-experience YAMLs copied from older `platform: speaker` media
+  player blocks should be refreshed against the maintained 2026.7.0-dev
+  packages.
+- Sendspin / Music Assistant is included as an experimental source in full
+  profiles. It is optional and still under field tuning for occasional
+  micro-glitches.
+- Native ESPHome intercom-only presets advertise 48 kHz PCM where the real
+  native I2S path supports it. AFE/AEC microphone branches remain
+  16 kHz/s16/mono because that is the Espressif AFE/AEC output format.
+- UDP audio is validated against `udp_max_payload` and still defaults to a
+  conservative 1200-byte PCM-frame ceiling. Use TCP or opt in explicitly for
+  larger LAN datagrams.
 
 Minimum versions for this release:
 
@@ -164,120 +146,6 @@ Known prerelease status:
   occasional micro-glitches.
 - UDP remains intentionally conservative by default. Raise `udp_max_payload`
   only after verifying the whole LAN path, or use TCP for larger PCM frames.
-
-### 2026.6.3 - Binary softphone audio and negotiated PCM formats
-
-`2026.6.3` replaces the old browser JSON/base64 audio path with a dedicated,
-authenticated binary WebSocket and completes the first negotiated-audio-format
-pass across ESP firmware, Home Assistant and the Lovelace card.
-
-Changes since `2026.6.2`:
-
-- 🔌 Lovelace/browser audio now uses `/api/intercom_native/ws`, not Home
-  Assistant's shared frontend WebSocket. Audio frames are binary PCM, control
-  messages are compact JSON on the same session-bound socket, and server-side
-  socket close is authoritative: if the browser disappears, HA hangs up the ESP
-  leg.
-- 🧠 The card now uses one page-level audio engine. Multiple cards on the same
-  dashboard subscribe to that engine as views instead of creating independent
-  microphone/playback pipelines. A card mounted mid-call receives replayed call
-  state from the engine.
-- 🔐 Card call-state events now use the integration-scoped
-  `intercom_native/subscribe_call_events` websocket command. This avoids HA's
-  generic `subscribe_events` custom-event permission trap for non-admin users.
-- 🎚️ PBX-lite START/ANSWER now negotiate PCM per direction. The legacy default
-  remains `16000:s16le:1:32`; newer peers can advertise `s16le`, `s24le`,
-  `s24le_in_s32` and `s32le` at common rates up to 48 kHz when their real audio
-  source/sink supports it.
-- 🔁 Home Assistant bridge sessions perform explicit PCM conversion when two
-  legs negotiate different formats. Conversion includes channel mapping,
-  container conversion, sample-rate conversion and frame-duration reframing.
-- 📡 UDP endpoints advertise only formats that fit a complete PCM frame in one
-  configured datagram. The default `udp_max_payload` is 1200 bytes and does
-  not rely on IP fragmentation for realtime audio. Larger frames must use TCP,
-  a smaller format/frame duration, or an explicit `udp_max_payload` override
-  on both HA and ESPHome after verifying the LAN path.
-- 🧾 HA services now validate target-bearing calls before handlers run. Empty
-  `call`, `hangup`, `decline`, `answer` or `forward` payloads fail schema
-  validation instead of producing resolver tracebacks.
-
-Upgrade note: custom clients using the removed JSON/base64 commands must move
-to the binary audio WebSocket before upgrading. See
-[`docs/BREAKING_CHANGES.md`](docs/BREAKING_CHANGES.md).
-
-### 2026.6.2 - HA softphone and audio runtime stabilization
-
-`2026.6.2` is focused on the Lovelace HA softphone, runtime AFE controls,
-external PBX-lite callers, optional Voice Assistant timers and full-device
-stability under normal HA/API restarts.
-
-Changes since the previous release:
-
-- 🧩 `intercom_native`: Home Assistant can now be represented as its own
-  PBX-lite softphone endpoint. The HA softphone accepts valid inbound calls,
-  exposes its own call state, Auto Answer and Do Not Disturb controls, and can
-  originate calls from HA without pretending to be a specific ESP.
-- 🧭 `intercom_native`: external LAN callers are accepted as PBX-lite peers
-  when they call Home Assistant directly. The phonebook remains the routing
-  source when HA must forward a call to another endpoint.
-- 🪪 `intercom_native`: ESP endpoints republish their endpoint/capability state
-  after Wi-Fi/API reconnects, and HA preserves intercom runtime state across HA
-  reconnects instead of losing the active call surface.
-- 🎛️ Lovelace card: added the new Home Assistant softphone mode requested in
-  [#46](https://github.com/n-IA-hane/esphome-intercom/issues/46). The existing
-  `hybrid` mode remains the default and keeps the previous behavior: the card is
-  attached to one ESP endpoint and mirrors/controls that ESP. If the selected
-  destination is Home Assistant, the browser/card acts as the Home Assistant
-  audio leg and starts a call toward the attached ESP; the ESP will ring, or
-  answer automatically if its Auto Answer is enabled.
-- 🏠 Lovelace card: `mode: ha_softphone` represents Home Assistant as an
-  independent intercom endpoint instead of mirroring an ESP. It can call
-  discovered ESP endpoints from its selector and rings only for calls addressed
-  to Home Assistant itself, which is useful for clean dashboards where HA should
-  behave like one standalone desk phone.
-- 🎨 Lovelace card: HA softphone controls, selectors and buttons now follow the
-  Home Assistant card surface styling more closely, including transparent form
-  controls and a dedicated HA softphone screenshot in the README.
-
-![Home Assistant softphone card](docs/images/ha-softphone-card.png)
-
-_Home Assistant softphone mode: one dashboard card represents HA itself and can
-call or answer independently from ESP-mirroring hybrid cards._
-
-- 🧪 Diagnostics: `tools/intercom_softphone_probe.py` can simulate an intercom
-  peer, call HA or ESP endpoints, send a generated tone or WAV, and record
-  received audio to WAV. This is useful for isolating card, HA and ESP audio
-  issues.
-- 🎙️ Full-experience AFE profiles now boot with VAD/AEC enabled and FD
-  high-perf selected where maintained board resources allow it. HA entities
-  mirror the boot pipeline first; users can still disable VAD/AEC or switch AFE
-  mode at runtime for testing.
-- 🔁 Runtime AFE rebuilds are serialized through the audio backend and coalesce
-  rapid mode changes so the latest requested AFE mode wins without racing the
-  active audio stack.
-- 🧱 The AFE output bridge now uses frame-atomic buffering so VA/MWW/intercom
-  consumers receive complete processed frames or silence, never short partial
-  reads.
-- 🧠 P4 full AFE profiles now use a cleaner SDK baseline: PSRAM XIP remains
-  enabled, aggressive Wi-Fi/LWIP IRAM overrides were removed, and hot
-  AFE/intercom bridge buffers stay internal when contiguous heap allows it. This
-  reduced display flicker and audio glitches on the Waveshare P4 validation
-  target while leaving significantly more largest-free-block headroom than the
-  older tuning set.
-- 🔊 Maintained full-experience YAMLs now use the source-based media path:
-  one `speaker_source` media player owns HA media, announcements, local audio
-  files and optional Sendspin streams, while the mixer arbitrates with
-  intercom and Voice Assistant audio.
-- ⏲️ Voice Assistant timers are now an optional drop-in package. Display devices
-  keep the timer-finished screen while the alarm sound plays, and full display
-  YAMLs share one reducer-style UI priority model instead of duplicating
-  conflicting display state logic.
-- 🧰 ReSpeaker Lite / Voice PE-style hardware with its own processed microphone
-  path is confirmed by users on the native ESPHome audio examples.
-
-Read the previous PBX-lite release note here: [2026.5.0 release notes](docs/RELEASE_2026_5_0.md).
-
----
 
 ## Overview
 

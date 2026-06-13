@@ -437,6 +437,8 @@ async def _async_build_peer_snapshot(hass: HomeAssistant) -> list[Peer]:
             udp_audio_port=udp_audio_port,
             udp_control_port=udp_control_port,
             audio_mode=d.get("audio_mode", "full_duplex"),
+            tx_formats=list(d.get("tx_formats") or []),
+            rx_formats=list(d.get("rx_formats") or []),
         ))
     ha_host = await _ha_advertise_host(hass)
     if ha_host:
@@ -476,12 +478,14 @@ def _format_entry_unified(peer: Peer) -> str:
             f"{name}|ha|{peer_ip}|{peer.tcp_port}|"
             f"{peer.udp_audio_port}|{peer.udp_control_port}"
         )
+    tx = ";".join(peer.tx_formats or [])
+    rx = ";".join(peer.rx_formats or [])
     if peer.transport == "udp":
         return (
             f"{name}|udp|{peer_ip}|{peer.udp_audio_port}|"
-            f"{peer.udp_control_port}|{peer.audio_mode}"
+            f"{peer.udp_control_port}|{peer.audio_mode}|{tx}|{rx}"
         )
-    return f"{name}|tcp|{peer_ip}|{peer.tcp_port}|{peer.audio_mode}"
+    return f"{name}|tcp|{peer_ip}|{peer.tcp_port}|{peer.audio_mode}|{tx}|{rx}"
 
 
 async def _async_build_service_info(
