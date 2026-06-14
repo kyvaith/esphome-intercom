@@ -52,7 +52,7 @@ regressions would be a problem.
   browser rebinds inside the server grace window.
 - 🧭 Device identity remains `device_id` based in the frontend. Legacy
   name/esphome-id matching is resolved server-side, once.
-- 🧪 The card version exposed in Lovelace is `v2026.7.0`.
+- 🧪 The card version exposed in Lovelace is `v2026.7.0-dev`.
 
 ## 📞 Intercom Protocol
 

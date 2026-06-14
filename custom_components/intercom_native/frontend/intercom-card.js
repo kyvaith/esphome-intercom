@@ -19,7 +19,7 @@ const INTERCOM_MODULE_VERSION = (() => {
     return "dev";
   }
 })();
-const INTERCOM_CARD_VERSION = INTERCOM_MODULE_VERSION.split("-")[0] || "dev";
+const INTERCOM_CARD_VERSION = INTERCOM_MODULE_VERSION.replace(/-\d+$/, "") || "dev";
 const { intercomEngine } = await import(`./intercom-engine.js?v=${encodeURIComponent(INTERCOM_MODULE_VERSION)}`);
 const HA_SOFTPHONE_DEVICE_ID = "__intercom_native_ha_softphone__";
 

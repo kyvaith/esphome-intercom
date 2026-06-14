@@ -160,8 +160,8 @@ and display-driven voice devices.
 | One ESP as a full-duplex citofono/intercom with Home Assistant | [`yamls/intercom-only/`](yamls/intercom-only/) | The ESP calls HA, HA can call the ESP, and the Lovelace card can answer from browser or mobile app. |
 | Room-to-room ESP intercom | One intercom-only YAML per ESP | Devices call each other by phonebook name. HA publishes the standard roster and can bridge when needed. |
 | Full voice device | [`yamls/full-experience/`](yamls/full-experience/) | Media player, Piper TTS, Micro Wake Word, Voice Assistant, AFE/AEC and intercom on the same ESP. |
-| Full voice device with hardware/DSP echo cancellation | [`generic-s3-full-esphome-native-tcp.yaml`](yamls/full-experience/esphome-native/generic-s3-full-esphome-native-tcp.yaml) or [`generic-s3-full-esphome-native-udp.yaml`](yamls/full-experience/esphome-native/generic-s3-full-esphome-native-udp.yaml) | Full experience on native ESPHome microphone/speaker components. Good starting point for XMOS-style front-ends that already remove echo in hardware. |
-| Standalone native ESPHome intercom | [`yamls/intercom-only/esphome-native/`](yamls/intercom-only/esphome-native/) | Full-duplex, mic-only and speaker-only examples using standard ESPHome audio components, without `esp_audio_stack`. |
+| Full voice device with hardware/DSP echo cancellation or separated native audio paths | [`generic-s3-full-esphome-native-tcp.yaml`](yamls/full-experience/esphome-native/generic-s3-full-esphome-native-tcp.yaml) or [`generic-s3-full-esphome-native-udp.yaml`](yamls/full-experience/esphome-native/generic-s3-full-esphome-native-udp.yaml) | Full experience on native ESPHome microphone/speaker components. Good starting point for XMOS-style front-ends that already remove echo in hardware, or for boards with independent mic/speaker I2S paths. |
+| Standalone native ESPHome intercom | [`yamls/intercom-only/esphome-native/`](yamls/intercom-only/esphome-native/) | Native mic-only, speaker-only and separated-path full-duplex examples using standard ESPHome audio components, without `esp_audio_stack`. Do not use this path for shared single-bus software-AEC builds. |
 | Audio driver for your own ESPHome Voice Assistant | [`esp_audio_stack`](esphome/components/esp_audio_stack/README.md) | Shared mic/speaker I2S path, speaker reference handling and audio lifecycle support without requiring intercom. |
 | Media, announcements and optional Music Assistant / Sendspin for full voice profiles | [`speaker_source` media path](docs/reference.md#full-experience-media-path) | One media player feeds the mixer with HA media, announcements, local files and optional Sendspin streams; intercom keeps its own higher-priority mixer source. |
 
@@ -1110,13 +1110,13 @@ sequenceDiagram
 | **Generic S3 (full AEC light UDP)** | [`generic-s3-full-aec-udp.yaml`](yamls/full-experience/single-bus/generic-s3-full-aec-udp.yaml) | Any I2S MEMS | Any I2S amp | Single bus (duplex) | `esp_aec` SR + `previous_frame` ref | Same full AEC light experience, UDP intercom transport |
 | **Generic S3 (full AFE, untested)** | [`generic-s3-full-afe-tcp.yaml`](yamls/untested/generic-s3-full-afe-tcp.yaml) | Any I2S MEMS | Any I2S amp | Single bus (duplex) | `esp_afe` (AEC + NS + AGC + VAD) + TYPE2 ring ref | VA + MWW + Intercom, requires >4 MB app slot |
 | **Generic S3 (full AFE UDP, untested)** | [`generic-s3-full-afe-udp.yaml`](yamls/untested/generic-s3-full-afe-udp.yaml) | Any I2S MEMS | Any I2S amp | Single bus (duplex) | `esp_afe` (AEC + NS + AGC + VAD) + TYPE2 ring ref | Same full AFE experience, UDP intercom transport, requires >4 MB app slot |
-| **Generic S3 (full native TCP)** | [`generic-s3-full-esphome-native-tcp.yaml`](yamls/full-experience/esphome-native/generic-s3-full-esphome-native-tcp.yaml) | Native ESPHome mic or processed front-end | Native ESPHome speaker | Native ESPHome audio | Native ESPHome `microphone`/`speaker`, no software AEC | Full experience for XMOS/hardware-AEC front-ends or native audio testing |
+| **Generic S3 (full native TCP)** | [`generic-s3-full-esphome-native-tcp.yaml`](yamls/full-experience/esphome-native/generic-s3-full-esphome-native-tcp.yaml) | Native ESPHome mic or processed front-end | Native ESPHome speaker | Native ESPHome audio | Native ESPHome `microphone`/`speaker`, no software AEC | Full experience for XMOS/hardware-AEC front-ends, separated I2S mic/speaker paths, or native audio testing |
 | **Generic S3 (full native UDP)** | [`generic-s3-full-esphome-native-udp.yaml`](yamls/full-experience/esphome-native/generic-s3-full-esphome-native-udp.yaml) | Native ESPHome mic or processed front-end | Native ESPHome speaker | Native ESPHome audio | Native ESPHome `microphone`/`speaker`, no software AEC | Same full native experience, UDP intercom transport |
-| **Generic S3 (native intercom full-duplex TCP/UDP)** | [`generic-s3-intercom-esphome-native-full-duplex-tcp.yaml`](yamls/intercom-only/esphome-native/generic-s3-intercom-esphome-native-full-duplex-tcp.yaml) / [`udp`](yamls/intercom-only/esphome-native/generic-s3-intercom-esphome-native-full-duplex-udp.yaml) | Native ESPHome mic or processed front-end | Native ESPHome speaker | Native ESPHome audio | None in firmware; use hardware/DSP AEC if needed | Intercom-only native ESPHome audio |
+| **Generic S3 (native intercom full-duplex TCP/UDP)** | [`generic-s3-intercom-esphome-native-full-duplex-tcp.yaml`](yamls/intercom-only/esphome-native/generic-s3-intercom-esphome-native-full-duplex-tcp.yaml) / [`udp`](yamls/intercom-only/esphome-native/generic-s3-intercom-esphome-native-full-duplex-udp.yaml) | Native ESPHome mic or processed front-end | Native ESPHome speaker | Separated native ESPHome audio paths | None in firmware; use hardware/DSP AEC if needed | Intercom-only native ESPHome audio for two independent I2S paths, not a shared single-bus AEC backend |
 | **Generic S3 (native intercom mic-only TCP/UDP)** | [`generic-s3-intercom-esphome-native-mic-only-tcp.yaml`](yamls/intercom-only/esphome-native/generic-s3-intercom-esphome-native-mic-only-tcp.yaml) / [`udp`](yamls/intercom-only/esphome-native/generic-s3-intercom-esphome-native-mic-only-udp.yaml) | Native ESPHome mic or processed front-end | None | Native ESPHome audio | None in firmware; use hardware/DSP AEC if needed | One-way microphone endpoint |
 | **Generic S3 (native intercom speaker-only TCP/UDP)** | [`generic-s3-intercom-esphome-native-speaker-only-tcp.yaml`](yamls/intercom-only/esphome-native/generic-s3-intercom-esphome-native-speaker-only-tcp.yaml) / [`udp`](yamls/intercom-only/esphome-native/generic-s3-intercom-esphome-native-speaker-only-udp.yaml) | None | Native ESPHome speaker | Native ESPHome audio | Not applicable | One-way speaker endpoint |
-| **Generic S3 (intercom)** | [`generic-s3-intercom-tcp.yaml`](yamls/intercom-only/single-bus/generic-s3-intercom-tcp.yaml) | Any I2S MEMS | Any I2S amp | Single bus (duplex) | `esp_aec` + `previous_frame` ref | Intercom only |
-| **Generic S3 dual bus (intercom UDP)** | [`generic-s3-intercom-udp.yaml`](yamls/intercom-only/dual-bus/generic-s3-intercom-udp.yaml) | Any I2S MEMS | Any I2S amp | Dual bus | `esp_aec` + `previous_frame` ref | Intercom only |
+| **Generic S3 single bus (intercom TCP/UDP)** | [`generic-s3-intercom-tcp.yaml`](yamls/intercom-only/single-bus/generic-s3-intercom-tcp.yaml) / [`udp`](yamls/intercom-only/single-bus/generic-s3-intercom-udp.yaml) | Any I2S MEMS | Any I2S amp | Single bus (duplex) | `esp_aec` + `previous_frame` ref | Intercom only |
+| **Generic S3 dual bus (intercom TCP/UDP)** | [`generic-s3-intercom-tcp.yaml`](yamls/intercom-only/dual-bus/generic-s3-intercom-tcp.yaml) / [`udp`](yamls/intercom-only/dual-bus/generic-s3-intercom-udp.yaml) | Any I2S MEMS | Any I2S amp | Dual bus | `esp_aec` + `previous_frame` ref | Intercom only |
 
 > **Want to help expand this list?** Send me a device to test or consider a [donation](https://github.com/sponsors/n-IA-hane), every bit helps!
 
@@ -1227,19 +1227,24 @@ Three ESPHome components sit between your codec and the intercom / voice assista
 
 _The same audio stack can serve intercom, Voice Assistant, TTS and media workloads on full voice devices._
 
-Plain intercom does **not** require `esp_audio_stack`: `intercom_api` can run
-on ESPHome's normal `microphone` and/or `speaker` components. This is the right
-fit for hardware/DSP-processed audio such as XMOS front-ends, or for simple
-native I2S tests. It supports full-duplex, mic-only and speaker-only endpoints.
-For mic-only or speaker-only intercom endpoints, keep the native ESPHome path:
-`esp_audio_stack` is intentionally a heavier audio backend for full audio
-devices and software AEC/reference handling.
+Plain intercom does **not** always require `esp_audio_stack`: `intercom_api`
+can run on ESPHome's normal `microphone` and/or `speaker` components. This is
+the right fit for hardware/DSP-processed audio such as XMOS front-ends, for
+mic-only or speaker-only endpoints, and for full-duplex tests where microphone
+and speaker are exposed as independent native ESPHome paths.
+
+Native ESPHome audio is **not** the shared single-bus software-AEC backend. If
+your board is a plain MEMS mic plus I2S amplifier sharing timing or needing a
+software reference, use an `esp_audio_stack` AEC/AFE profile. `esp_audio_stack`
+is intentionally heavier because it owns the coordinated mic/speaker lifecycle,
+reference capture and mixer arbitration needed by full audio devices.
+
 The full native examples under `yamls/full-experience/esphome-native/` extend
 that idea to VA, MWW, media player and intercom on native ESPHome audio
 components. The intercom-only native examples under
-`yamls/intercom-only/esphome-native/` provide dedicated full-duplex, mic-only
-and speaker-only starting points without carrying unrelated full-experience
-blocks.
+`yamls/intercom-only/esphome-native/` provide dedicated separated-path
+full-duplex, mic-only and speaker-only starting points without carrying
+unrelated full-experience blocks.
 
 Native ESPHome audio does not add software echo cancellation by itself. If your
 microphone path is already processed by hardware or firmware, for example an

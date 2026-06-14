@@ -50,9 +50,10 @@ Each ESPHome component ships its own README with the full option list, YAML snip
 
 - [`intercom_api`](../esphome/components/intercom_api/README.md), the PBX-lite TCP/UDP transport, call state machine and Home Assistant bridge.
 - [`esp_audio_stack`](../esphome/components/esp_audio_stack/README.md), the
-  full-duplex audio backend/wiki for shared codec buses, dual I2S MEMS/amp
-  boards, Espressif rate/layout conversion, AEC reference capture, PSRAM
-  placement and post-processor mic output.
+  coordinated full-duplex audio backend for shared codec buses, dual I2S
+  MEMS/amp boards that need software reference handling, Espressif
+  rate/layout conversion, AEC reference capture, PSRAM placement and
+  post-processor mic output.
 - Full-experience media now uses ESPHome's source-based `speaker_source` path:
   HA media, announcements, local files and optional Sendspin streams feed one
   media player before the mixer arbitrates with intercom and Voice Assistant.

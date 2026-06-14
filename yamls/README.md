@@ -22,9 +22,12 @@ yamls/
   intercom-only/         Intercom without Voice Assistant or Wake Word
     single-bus/          Devices using esp_audio_stack (mic+speaker on same I2S bus)
     dual-bus/            Devices using esp_audio_stack rx_bus + tx_bus
+    esphome-native/      Native ESPHome mic/speaker examples
 
   full-experience/       VA + MWW + Intercom (complete voice assistant hub)
     single-bus/          esp_audio_stack full profiles
+    dual-bus/            esp_audio_stack full profiles with separate RX/TX buses
+    esphome-native/      Native ESPHome audio profiles for processed/separate paths
 
   experimental/          Untested topologies (compile-only, contributions welcome)
 ```
@@ -40,6 +43,12 @@ published. Reusable debug building blocks are public packages under
 - **Dual-bus**: mic and speaker on separate I2S peripherals using `esp_audio_stack`
   `rx_bus` and `tx_bus` with official ESP-IDF I2S simplex channels. Simpler setup
   for MEMS mic + class-D amp boards (SPH0645 + MAX98357A).
+
+- **Native ESPHome**: `intercom_api` binds directly to ESPHome `microphone`
+  and/or `speaker` components. Use it for mic-only/speaker-only endpoints,
+  hardware/DSP-processed audio, or independent mic/speaker paths that do not
+  need software AEC. Use `esp_audio_stack` instead for shared-bus or
+  software-reference builds.
 
 ## Audio processor: esp_aec vs esp_afe
 

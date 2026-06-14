@@ -6,10 +6,12 @@ a new device without reading every file.
 ```
 yamls/
 ├── intercom-only/     no wake word, no voice assistant
-│   ├── single-bus/    one full-duplex I2S bus (codec or per-chip ADC+DAC)
-│   └── dual-bus/      mic and speaker on separate I2S controllers
+│   ├── single-bus/    esp_audio_stack owns a coordinated mic/speaker bus
+│   └── dual-bus/      esp_audio_stack owns separate I2S RX/TX controllers
 ├── full-experience/   intercom + wake word + voice assistant
-│   └── single-bus/    esp_audio_stack + esp_aec or esp_afe
+│   ├── single-bus/    esp_audio_stack + esp_aec or esp_afe
+│   ├── dual-bus/      esp_audio_stack full profiles with separate RX/TX buses
+│   └── esphome-native/ native ESPHome audio for processed/separate paths
 └── experimental/      bring-up/reference YAMLs, not release baselines
 ```
 
@@ -32,12 +34,14 @@ Follow the first branch that matches your hardware and intent.
    - Wake word / VA too → `yamls/full-experience/`
 
 2. **How many I2S buses does your hardware expose?**
-   - One full-duplex bus (codec does both, or a shared bus with TDM) →
+   - One shared audio bus, codec bus, or software-AEC/reference path →
      `single-bus/`
-   - Two (mic bus + speaker bus, independent pins) → `intercom-only/dual-bus/`
-     for the maintained intercom profiles.
+   - Two independent native mic/speaker paths with no software AEC requirement
+     → native ESPHome examples under `intercom-only/esphome-native/`
+   - Two mic/speaker I2S buses that still need software AEC/reference handling
+     → `intercom-only/dual-bus/` for the maintained `esp_audio_stack` profiles.
 
-3. **(full-experience / single-bus only) Which processor profile fits?**
+3. **(full-experience) Which audio backend/processor profile fits?**
    - Codec/TDM boards and dual-mic targets → `esp_afe` presets with ESP-SR AFE,
      AEC, NS, AGC, VAD, and hardware/TDM playback reference.
    - Generic one-mic no-codec targets with 4 MB flash → `generic-s3-full-aec-*`,
