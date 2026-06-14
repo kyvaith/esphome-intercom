@@ -221,6 +221,17 @@ codec-private analog register scripts, and raw multi-channel microphone output
 as a standard ESPHome microphone. Those require separate backend/component work;
 exposing them as inert options would make custom builds harder to debug.
 
+## Future Work
+
+- **Dual I2S microphones with software AEC reference**: Espressif AFE can
+  consume interleaved `MMR` frames (two microphone channels plus playback
+  reference). A future `esp_audio_stack` mode can build that frame explicitly
+  from a stereo INMP441-style microphone bus (`MM`) and the existing software
+  reference path (`R`, for example `aec_reference: previous_frame`). This is
+  separate from the current single-mic `MR` AEC path and should be implemented
+  only after release validation, because it changes the AFE feed layout and
+  needs hardware tests with a real two-mic board.
+
 ## Practical Rule
 
 When adding or updating audio features, prefer Espressif-provided managers and
