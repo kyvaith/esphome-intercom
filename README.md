@@ -577,10 +577,22 @@ On desktop Chrome or Chromium:
 
 On the Home Assistant Companion app for Android:
 
-1. Close the app.
+1. Open the Home Assistant app.
+2. Go to **Settings** -> **Companion App** -> **Troubleshooting**.
+3. Tap **Reset frontend cache**.
+4. Close and reopen the app.
+5. Check the version shown at the bottom-right of the card. It must match the
+   Intercom Native version you just installed.
+
+If that option is not available on your Companion App build, or the stale card
+still remains after the frontend-cache reset, use Android's fallback app-cache
+cleanup:
+
+1. Close the Home Assistant app.
 2. Open Android **Settings**.
-3. Open the Home Assistant app settings.
-4. Clear the app cache.
+3. Open **Apps** -> **Home Assistant** -> **Storage and cache**.
+4. Tap **Clear cache**. Do not clear app storage unless you intentionally want
+   to log in again and reset the app.
 5. Reopen the app and check the card version shown at the bottom-right.
 
 Home Assistant can update/reload Lovelace resources, and this integration

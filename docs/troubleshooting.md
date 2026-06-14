@@ -34,7 +34,9 @@ Common symptoms and fixes when setting up ESPHome Intercom.
 6. Verify `sensor.intercom_phonebook` has a `phonebook` attribute containing
    both the Home Assistant row and the ESP endpoint row. The entity state is
    only a short count such as `2 entries`; the CSV roster is in the attribute.
-7. Clear browser cache and reload.
+7. Clear the frontend/browser cache and reload. On Android Companion App, use
+   **Settings** -> **Companion App** -> **Troubleshooting** -> **Reset frontend
+   cache** first; Android system **Clear cache** is only the fallback.
 
 ## No audio from ESP speaker
 
@@ -66,8 +68,9 @@ Check these in order:
 1. Confirm the installed `intercom_native` backend and served card are from the
    same release. The integration serves `/intercom-native/intercom-card.js`; a
    stale browser cache can leave an old card talking to a new backend, or the
-   reverse. Hard-refresh the dashboard or clear the app WebView cache after an
-   upgrade.
+   reverse. Hard-refresh the dashboard after an upgrade. On Android Companion
+   App, use **Settings** -> **Companion App** -> **Troubleshooting** ->
+   **Reset frontend cache** before trying Android system **Clear cache**.
 2. Open HA logs and look for `IntercomAudioWebSocketView`,
    `invalid_audio_frame`, `connection_failed`, `busy`, `target_not_found` or
    `unsupported_udp_audio_format`. These are integration errors and should be
