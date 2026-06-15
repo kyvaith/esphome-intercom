@@ -1114,6 +1114,12 @@ With `audio_stack` on **Core 0**, AEC no longer competes with LVGL/display on Co
 - **Media files should match bus sample rate**: For best quality, use media files at the bus `sample_rate` (e.g. 48kHz). The `resampler` speaker handles conversion from any rate, but native rate avoids resampling artifacts.
 - **loopTask long-operation warnings during 48kHz streaming**: ESPHome reports `[W] mixer.speaker took a long time (110ms)` and similar warnings for `resampler.speaker`, `api`, `wifi` during audio playback. This is **expected and harmless**. These components run in loopTask (Core 1, prio 1) and process audio/network chunks that take >30ms. All real-time audio runs in dedicated tasks on Core 0 and is unaffected.
 - **AEC is ESP-SR closed-source**: Cannot reset the adaptive filter without recreating the handle. When a processor is configured, this component no longer switches to raw mic audio during idle or reinit windows; unavailable processed output is silenced.
+- **Future processor bypass control**: A runtime processor on/off switch is a
+  candidate for a later release, mainly for dual-mic/BSS targets where disabling
+  AEC but keeping the AFE/BSS graph can sound metallic. The intended shape is
+  one public microphone surface: processor on = post-AEC/AFE output; processor
+  off = explicit mono raw-mic bypass with a clear log message. This is not part
+  of the 2026.7.0-dev release path.
 - **TDM analog reference vs ES8311 digital feedback**: The digital feedback path (ES8311 stereo loopback) provides a cleaner reference signal for AEC than the TDM analog path (ES7210 MIC3 capturing speaker output). Analog loopback introduces non-linear distortion from the DAC/amplifier chain that the AEC linear adaptive filter cannot fully model. Expect ~95-98% echo cancellation with analog reference vs ~99% with digital feedback. Both are adequate for voice assistant and intercom use.
 - **AEC reference**: The reference signal is always the exact post-volume PCM sent to the speaker, with no additional scaling. For hardware codec setups (ES8311, TDM), the reference naturally includes hardware volume. For software reference (no codec), the reference includes software volume. Pre-AEC input gain/gain affects only the mic signal, not the reference; use it sparingly because it changes what the AEC/AFE sees.
 

@@ -318,13 +318,19 @@ does not make either component a hard dependency of the other.
 
 ### 6.1 Why `esp_audio_stack` owns the audio task, not `audio_processor`
 
-The transport owns the single audio task and exposes raw + processed frames via callbacks. The processor exposes `process()` synchronously and runs its own async workers internally.
+The transport owns the single audio task and exposes the public processed frame
+surface to ESPHome consumers. The processor exposes `process()` synchronously
+and runs its own async workers internally.
 
 Alternative considered: move the task into the processor, let the transport be a pure DMA pump. Rejected because the transport has hardware knowledge (TDM vs stereo, rate-conversion ratio, reference channel placement) that the processor does not want to know, and two of the four supported use cases (intercom-only, intercom+AEC) don't have an AFE-style processor at all.
 
 ### 6.2 Why the consumer list in `esp_audio_stack`, not in the processor
 
-Consumers want diagnostic/raw tap points and processed frames, but production MWW, VA and intercom TX must use the processed stream when a processor is configured. The transport is the only component that can expose both surfaces without leaking raw audio into processor consumers.
+Consumers need one stable public microphone surface, and production MWW, VA and
+intercom TX must use the processed stream when a processor is configured. If a
+future diagnostic or explicit processor-bypass tap is added, it belongs in the
+transport because only the transport knows the hardware layout and can prevent
+raw audio from leaking into processor consumers by accident.
 
 ### 6.3 Why esp-sr lives behind `audio_processor` and not used directly
 
@@ -373,10 +379,10 @@ keeps SE/BSS structural, so runtime SE toggles no longer force a 2-mic to
 `agc_enabled=false`. With all features off, the esp-sr
 instance has nothing to do and the component tears it down. The standard
 processor output emits silence in this state, not raw microphone audio. Raw or
-pre-AFE audio belongs only to explicit diagnostic taps or no-processor paths,
-never to MWW, VA or intercom TX when an AFE processor is configured. Dual-mic
-AFE keeps SE/BSS structural, so that all-off state is not reachable on the P4
-landscape path.
+pre-AFE audio belongs only to an explicit future bypass/diagnostic path or to
+no-processor builds, never to MWW, VA or intercom TX by implicit fallback when
+an AFE processor is configured. Dual-mic AFE keeps SE/BSS structural, so that
+all-off state is not reachable on the P4 landscape path.
 
 Why it exists: symmetric config surface. Users can disable any subset,
 including all, without forcing a config validation error. Silence is safer than
