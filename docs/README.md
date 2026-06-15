@@ -53,7 +53,9 @@ Each ESPHome component ships its own README with the full option list, YAML snip
   coordinated full-duplex audio backend for shared codec buses, dual I2S
   MEMS/amp boards that need software reference handling, Espressif
   rate/layout conversion, AEC reference capture, PSRAM placement and
-  post-processor mic output.
+  post-processor mic output. On AEC/AFE profiles, its standard ESPHome
+  microphone facade is the cleaned stream consumed by MWW, Voice Assistant and
+  intercom while media/TTS keeps playing through the speaker.
 - Full-experience media now uses ESPHome's source-based `speaker_source` path:
   HA media, announcements, local files and optional Sendspin streams feed one
   media player before the mixer arbitrates with intercom and Voice Assistant.

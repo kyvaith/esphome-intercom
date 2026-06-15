@@ -83,6 +83,44 @@ MWW, Voice Assistant, media_player, mixer, intercom_api, custom components
 - **Compile-time pruning**: dual-bus, TDM, stereo reference, ring reference,
   stereo TX, telemetry and codec paths are compiled only when YAML needs them.
 
+## Clean Mic Surface For Wake Word, VA And Intercom
+
+This is the main reason to use `esp_audio_stack` on full voice devices. The
+public `microphone: platform: esp_audio_stack` entry is the post-processor
+surface, not a second raw microphone tap. Speaker PCM from HA media, TTS,
+timers, local files, Sendspin and intercom playback is also captured as the
+AEC/AFE reference. `esp_aec` or `esp_afe` subtracts that reference before
+frames are delivered to ESPHome consumers.
+
+Result: the user can play music from the ESP speaker while `micro_wake_word`,
+`voice_assistant` and `intercom_api` all receive the same cleaned user-speech
+stream with the speaker audio removed. There is no separate wake-word
+microphone to wire and no need to route VA or MWW around the media player.
+
+If no processor is configured, the facade is still a coordinated full-duplex
+mic/speaker provider, but the microphone is not echo-cancelled. If a configured
+processor cannot produce valid output, the stack emits silence instead of
+falling back to raw mic audio, so speaker echo is not silently leaked into wake
+word, STT or intercom TX.
+
+The YAML stays normal ESPHome from the consumer side:
+
+```yaml
+microphone:
+  - platform: esp_audio_stack
+    id: clean_mic
+    esp_audio_stack_id: audio_stack
+
+micro_wake_word:
+  microphone: clean_mic
+
+voice_assistant:
+  microphone: clean_mic
+
+intercom_api:
+  microphone: clean_mic
+```
+
 ## Important Knobs
 
 Most boards should start from a maintained YAML and only change pins, codec type

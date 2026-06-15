@@ -169,6 +169,10 @@ processor with the fixed 512-sample 16 kHz frames that `esp_afe` requires.
 setups should bind `intercom_api` directly to ESPHome microphone/speaker
 components, while software AEC/AFE setups should put the processor on
 `esp_audio_stack` and pass its microphone/speaker facade to `intercom_api`.
+On those profiles, that facade is the same post-AEC/AFE stream used by Micro
+Wake Word and Voice Assistant. Speaker playback from media, TTS, ringtones or
+intercom RX feeds the AEC reference, then `intercom_api` transmits cleaned user
+speech instead of raw speaker echo.
 
 ### Modularity rule
 

@@ -162,7 +162,7 @@ and display-driven voice devices.
 | Full voice device | [`yamls/full-experience/`](yamls/full-experience/) | Media player, Piper TTS, Micro Wake Word, Voice Assistant, AFE/AEC and intercom on the same ESP. |
 | Full voice device with hardware/DSP echo cancellation or separated native audio paths | [`generic-s3-full-esphome-native-tcp.yaml`](yamls/full-experience/esphome-native/generic-s3-full-esphome-native-tcp.yaml) or [`generic-s3-full-esphome-native-udp.yaml`](yamls/full-experience/esphome-native/generic-s3-full-esphome-native-udp.yaml) | Full experience on native ESPHome microphone/speaker components. Good starting point for XMOS-style front-ends that already remove echo in hardware, or for boards with independent mic/speaker I2S paths. |
 | Standalone native ESPHome intercom | [`yamls/intercom-only/esphome-native/`](yamls/intercom-only/esphome-native/) | Native mic-only, speaker-only and separated-path full-duplex examples using standard ESPHome audio components, without `esp_audio_stack`. Do not use this path for shared single-bus software-AEC builds. |
-| Audio driver for your own ESPHome Voice Assistant | [`esp_audio_stack`](esphome/components/esp_audio_stack/README.md) | Shared mic/speaker I2S path, speaker reference handling and audio lifecycle support without requiring intercom. |
+| Audio driver for your own ESPHome Voice Assistant | [`esp_audio_stack`](esphome/components/esp_audio_stack/README.md) | Shared mic/speaker I2S path, speaker reference handling and a clean post-AEC microphone facade for MWW, Voice Assistant and intercom while media/TTS keeps playing. |
 | Media, announcements and optional Music Assistant / Sendspin for full voice profiles | [`speaker_source` media path](docs/reference.md#full-experience-media-path) | One media player feeds the mixer with HA media, announcements, local files and optional Sendspin streams; intercom keeps its own higher-priority mixer source. |
 
 For the normal intercom use case, do not start by designing a PBX. Pick the
@@ -360,7 +360,9 @@ phonebook, omit the HA phonebook subscription package.
   - **Dual-mic (MMR)**: AEC + Speech Enhancement + Voice Activity Detector.
   - Runtime switches and diagnostic sensors in Home Assistant.
   - Automatic pipeline switching: Speech Enhancement replaces NS/AGC when spatial separation is active.
-- **Voice Assistant compatible** - Coexists with ESPHome Voice Assistant and Micro Wake Word.
+- **Voice Assistant compatible** - Full profiles expose one post-AEC microphone
+  surface, so Micro Wake Word, Voice Assistant and intercom receive cleaned
+  user speech while music, TTS or ringtone audio is playing from the speaker.
 - **Ready-to-flash YAML configs** - Optimized configurations for real, tested hardware combining Voice Assistant, Micro Wake Word and Intercom on the same device.
 - **Auto Answer** - Configurable automatic call acceptance (ESP-side switch + browser card checkbox).
 - **HA Services** - `intercom_native.answer`, `decline` (with optional `reason`), `hangup`, `call`, `forward`, `purge_devices`. All registered with explicit `voluptuous` schemas (`extra=PREVENT_EXTRA`); empty target-bearing calls fail schema validation before handlers run.
@@ -1272,6 +1274,13 @@ mic/speaker hardware without hardware echo cancellation. It can also be useful
 outside intercom projects: an ESPHome Voice Assistant device can use it as the
 shared mic/speaker transport and AEC reference path.
 
+On AEC/AFE profiles the public ESPHome microphone exposed by `esp_audio_stack`
+is the processed surface. Music, TTS, timers, Sendspin and intercom playback
+feed the speaker path and the AEC/AFE reference, while Micro Wake Word, Voice
+Assistant and intercom TX receive the cleaned microphone stream. That is why a
+full device can keep playing media and still wake reliably on the user's voice
+instead of on its own speaker output.
+
 Full voice profiles that expose media playback use `speaker_source`: HA media,
 announcements, local files and optional Sendspin streams are sources of one
 media player, and the mixer remains the single arbitration point before the
@@ -1292,6 +1301,11 @@ Full-duplex audio backend for shared codec buses and no-codec MEMS/amp boards.
 It owns I2S/codec IO, rate conversion, channel layout, software/hardware AEC
 reference capture, speaker buffering and mic consumer fan-out, then exposes
 normal ESPHome `microphone` and `speaker` platforms above that.
+
+With `esp_aec` or `esp_afe` attached, that `microphone` platform is the cleaned
+post-processor stream. MWW, Voice Assistant and `intercom_api` all consume the
+same echo-cancelled audio while media/TTS/ringtones continue through the shared
+speaker and mixer path.
 
 The stack can be used without intercom. For custom devices it covers:
 single-bus codecs, dual I2S RX/TX, 32-bit MEMS microphones, stereo RX slot
@@ -1351,7 +1365,7 @@ Pick `esp_afe` if you actually need NS, AGC or Speech Enhancement, or if you wan
   </tr>
 </table>
 
-The Voice Assistant, Micro Wake Word, and Intercom coexist seamlessly on the same hardware: shared microphone, shared speaker (via 3-source audio mixer with ducking), always-on wake word detection. No display required (works on headless devices like the Waveshare S3 Audio); on devices with a screen, you also get a full touch UI:
+The Voice Assistant, Micro Wake Word, and Intercom coexist seamlessly on the same hardware: shared cleaned microphone, shared speaker (via mixer/source arbitration), always-on wake word detection. No display required (works on headless devices like the Waveshare S3 Audio); on devices with a screen, you also get a full touch UI:
 
 - **Always listening**: Micro Wake Word runs continuously on **post-AEC** audio (`stop_after_detection: false`). SR linear AEC preserves the spectral features that the neural wake word model relies on (10/10 detection vs 2/10 with VOIP AEC modes). MWW detects the wake word even while TTS is playing, during music, or during an intercom call
 - **Audio ducking**: When the wake word is detected, background music automatically ducks (-20dB). Volume restores when the VA cycle ends. During intercom calls, music is also ducked. The 3-source mixer (media + TTS + intercom) enables independent volume control per source

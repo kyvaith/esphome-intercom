@@ -76,6 +76,10 @@ Ownership rules:
 - `audio_processor` is the contract. It takes an interleaved mic frame and returns an interleaved mic frame, optionally with VAD / Speech Enhancement metadata.
 - `esp_afe` / `esp_aec` are `audio_processor` implementations wrapping Espressif's esp-sr library. They own their worker tasks.
 - Consumers register with `esp_audio_stack` to receive processed mic frames. They never talk to the processor directly.
+- Speaker output from media, TTS, ringtone, Sendspin and intercom RX is also
+  captured as the processor reference. With `esp_aec` or `esp_afe` attached,
+  Micro Wake Word, Voice Assistant and intercom TX therefore consume user
+  speech after speaker echo has been removed.
 
 ---
 
